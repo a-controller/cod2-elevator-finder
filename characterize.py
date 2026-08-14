@@ -818,6 +818,12 @@ def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False):
     for w in workers:
         w.start()
 
+    # Watch OUR processes only. Summing every python.exe on the machine (what
+    # memwatch did before) counts whatever else the user has open, so the
+    # ceiling could fire on memory the scan never allocated -- and the
+    # peak_mem written to the journal was inflated by the same amount.
+    watched = [os.getpid()] + [w.pid for w in workers if w.pid]
+
     fh = open(out_path, 'a', newline='')
     w_csv = csv.DictWriter(fh, fieldnames=PRODUCTION_COLUMNS)
     if ecrire_entete:
@@ -841,7 +847,7 @@ def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False):
             try:
                 row = q_resultats.get(timeout=PERIODE_MEM)
             except _queue.Empty:
-                m = memwatch.memory_mb(None)
+                m = memwatch.memory_mb(watched)
                 peak_mem = max(peak_mem, m)
                 if m > MEMORY_CEILING_MB:
                     print("  !! MEMORY CEILING EXCEEDED (%d Mo > %d) -- stopping, rerun will resume"

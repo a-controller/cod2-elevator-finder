@@ -56,6 +56,18 @@ Use it if you can write coordinates directly into memory. The `setviewpos`
 line is the in-game console command, but the console does not accept
 decimals, and rounding alone is sometimes enough to miss the column.
 
+The scan runs on three worker processes by default. On a machine you want to
+keep using while it works, or one that is short on cores or memory, lower it:
+
+```
+python production.py run mp_farmhouse --jobs 1 --maps-dir "C:\path\to\your\maps"
+```
+
+That is roughly three times slower and completely safe: results are written
+brush by brush, and re-running the same command resumes where it stopped. For
+scale, `mp_farmhouse` (1686 brushes) takes about 4.5 minutes and 154 MB on
+three workers.
+
 To check the tool is working before trusting a result:
 
 ```
@@ -112,7 +124,7 @@ a crash or an abort only costs the brush in progress.
 | option | meaning |
 |---|---|
 | `--maps-dir <dir>` | where your dumps and `.d3dbsp` files live. Falls back to `COD2_MAPS_DIR`, then to `maps/` next to the scripts. |
-| `--jobs N` | worker processes, default 3. More is faster, but when two columns tie on the same score, which one gets reported is not reproducible. |
+| `--jobs N` | worker processes, default 3. More is faster, but when two columns tie on the same score, which one gets reported is not reproducible. Peak memory is measured across the scan's own processes: 154 MB on `mp_farmhouse` (1686 brushes, 3 workers). Heavier maps use more, against a 2.5 GB ceiling that stops the run; re-running resumes from the CSV. Windows only, see Known limitations. |
 | `--all` | every map found in the maps directory instead of a single one. |
 | `--no-budget` | catch-up pass. Re-runs only the brushes previously marked `TOO_BIG` or `BUDGET_EXCEEDED`, with no time budget. Run `budget` first to see what is waiting. |
 
