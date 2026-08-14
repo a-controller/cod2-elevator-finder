@@ -95,6 +95,17 @@ scripts:
   with no need to load the map in-game. Works with `production.py` and
   `characterize.py`, but not with `detect.py` called directly.
 
+**Only one build has been tested: CoD2x 1.4.6.8.** Every dump, every spot and
+every figure in this README comes from that build. Stock Call of Duty 2 has
+never been tried. `dump_clipmap.lua` reads the clipmap through hardcoded
+structure offsets, so a build with a different layout may need `CM_ADDR` set
+by hand, or new offsets. On such a build the plausibility checks should reject
+every candidate and the script should stop with `could not locate clipMap_t`
+rather than write a wrong dump. That is the intended failure, not a guarantee.
+Check the counters it prints against the map you loaded before trusting a dump
+from any other build. The `.d3dbsp` path does not read game memory and is not
+affected.
+
 **The `.d3dbsp` path under-detects.** Measured on `mp_farmhouse`, it finds
 only 1 of the 2 known reference spots. Brush `#3455` differs between the two
 sources: `mins.z` is 208.0 on disk against 200.0 in the memory dump, and the
@@ -195,6 +206,10 @@ work through them.
 
 ## Known limitations
 
+* **Tested on CoD2x 1.4.6.8 only.** Stock Call of Duty 2 has never been
+  tried. The memory dump depends on hardcoded clipmap offsets, so another
+  build may need `CM_ADDR` set by hand, or new offsets. See "Bring your own
+  map files".
 * **The memory ceiling is Windows-only.** `memwatch.py` reads process
   memory through `tasklist`. On any other OS the ceiling that aborts a
   runaway `production.py` run is inactive. The scan still works, it just
