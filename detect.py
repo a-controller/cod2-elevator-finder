@@ -337,12 +337,12 @@ def _worker_chunk(chunk):
     return out
 
 
-def _blocks(it, taille):
-    """Splits an iterator into lists of `taille` elements."""
+def _blocks(it, size):
+    """Splits an iterator into lists of `size` elements."""
     buf = []
     for x in it:
         buf.append(x)
-        if len(buf) >= taille:
+        if len(buf) >= size:
             yield buf
             buf = []
     if buf:

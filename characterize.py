@@ -841,7 +841,7 @@ def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False):
             try:
                 row = q_resultats.get(timeout=PERIODE_MEM)
             except _queue.Empty:
-                m = memwatch.memory_mo(None)
+                m = memwatch.memory_mb(None)
                 peak_mem = max(peak_mem, m)
                 if m > MEMORY_CEILING_MB:
                     print("  !! MEMORY CEILING EXCEEDED (%d Mo > %d) -- stopping, rerun will resume"

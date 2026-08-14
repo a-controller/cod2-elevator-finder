@@ -57,11 +57,11 @@ def list_maps():
     """Memory dumps (`<maps-dir>/*.txt`) + compiled maps with no dump
     (`*.d3dbsp`), the latter via characterize._load_clipmap's disk fallback."""
     c = _import_characterize()
-    noms = {f[:-4] for f in os.listdir(c.cm_leafs.maps_dir()) if f.endswith('.txt')}
+    names = {f[:-4] for f in os.listdir(c.cm_leafs.maps_dir()) if f.endswith('.txt')}
     for d in c._bsp_dirs():
         if os.path.isdir(d):
-            noms.update(f[:-7] for f in os.listdir(d) if f.endswith('.d3dbsp'))
-    return sorted(noms)
+            names.update(f[:-7] for f in os.listdir(d) if f.endswith('.d3dbsp'))
+    return sorted(names)
 
 
 def _import_characterize():
@@ -76,18 +76,18 @@ def orphans_count(name):
 
 def cmd_estimate():
     print("%-22s %10s %12s" % ("map", "orphans", "estimate"))
-    tot = 0
+    total = 0
     for name in list_maps():
         try:
             n = orphans_count(name)
         except Exception as e:
             print("%-22s ERROR %s" % (name, e))
             continue
-        tot += n
+        total += n
         print("%-22s %10d %9.1f min" % (name, n, n * SECONDS_PER_BRUSH / 60))
     print("\nTOTAL %d orphan brushes, ~%.1f h (OPTIMISTIC estimate -- see the warning"
           " at the top of this script: do not rely on it for a single map, only to"
-          " order the batch)" % (tot, tot * SECONDS_PER_BRUSH / 3600))
+          " order the batch)" % (total, total * SECONDS_PER_BRUSH / 3600))
     return 0
 
 
@@ -108,7 +108,7 @@ def _verdict(name):
     with open(path, newline='') as fh:
         rows = list(csv.DictReader(fh))
     n = len(rows)
-    retenus = sum(1 for r in rows
+    kept = sum(1 for r in rows
                   if r.get('n_survivors') not in ('', None)
                   and float(r['n_survivors']) >= 1)
     spots = [r for r in rows if r.get('spot') == 'True']
@@ -117,7 +117,7 @@ def _verdict(name):
     too_big = sum(1 for r in rows if r.get('spot') == 'TOO_BIG')
     print("\nVERDICT %s : %d spots, %d DIVERGENCE, %d BUDGET_EXCEEDED, %d TOO_BIG"
           % (name, len(spots), len(divergences), budget, too_big))
-    print("  (%d orphan brushes processed, %d kept by the prefilter)" % (n, retenus))
+    print("  (%d orphan brushes processed, %d kept by the prefilter)" % (n, kept))
     for r in spots:
         x, y, z = float(r['x_col']), float(r['y_col']), float(r['z_col'])
         print("  brush #%-8s run_delta0_max=%s" % (r['brush_id'], r['run_delta0_max']))
@@ -187,12 +187,12 @@ def cmd_run(argv):
     if '--all' in argv:
         if maps_dir:
             _import_characterize().cm_leafs.set_maps_dir(maps_dir)
-        cibles = list_maps()
+        targets = list_maps()
         print("%d maps to process (already-done ones skipped automatically), %d workers%s"
-              % (len(cibles), jobs, "  [NO BUDGET]" if without_budget else ""))
+              % (len(targets), jobs, "  [NO BUDGET]" if without_budget else ""))
         tout_ok = True
-        for i, name in enumerate(cibles, 1):
-            print("\n[%d/%d]" % (i, len(cibles)), end=' ')
+        for i, name in enumerate(targets, 1):
+            print("\n[%d/%d]" % (i, len(targets)), end=' ')
             r = run_one(name, jobs, without_budget, maps_dir)
             if r == 'interrupted':
                 return 130
