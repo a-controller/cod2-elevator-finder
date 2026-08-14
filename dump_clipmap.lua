@@ -3,7 +3,8 @@
   by detect.py
 
   HOW TO USE
-    1. Start CoD2MP_s.exe and load the map you want to analyse (offline).
+    1. Start CoD2MP_s.exe and load the map with `devmap <map>`, so you are
+       dumping from your own offline session.
     2. In Cheat Engine, attach to the CoD2MP_s.exe process.
     3. Table -> Show Cheat Table Lua Script, paste this file, Execute.
     4. The dump is written to OUT_DIR .. <map_name> .. ".txt"

@@ -90,7 +90,8 @@ scripts:
   `dump_clipmap.lua`, included here. It is a read-only Cheat Engine script:
   it walks the loaded clipmap and writes it to disk, and never writes to the
   game's memory. Set `OUT_DIR` at the top of the script to the directory the
-  scanner reads, then follow the instructions in its header.
+  scanner reads, then follow the instructions in its header. Load the map with
+  `devmap <map>` so you are dumping from your own offline session.
 * **Compiled map** (`<map>.d3dbsp`), the fallback. Read straight off disk,
   with no need to load the map in-game. Works with `production.py` and
   `characterize.py`, but not with `detect.py` called directly.
