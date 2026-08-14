@@ -83,8 +83,39 @@ local function findModule()
   return nil
 end
 
+--- Gives Cheat Engine's main thread a chance to pump its message queue.
+---
+--- This matters on large maps. The script runs ON that thread, so a long loop
+--- freezes CE completely; past a few seconds Windows marks it Not Responding
+--- and swaps in a ghost window, which then vanishes -- the script finishes fine
+--- but its output is gone with the window. Call this every few thousand
+--- iterations and CE stays alive throughout.
+local function pump()
+  if processMessages then processMessages() end
+end
+
+--- Tests one candidate `a` == &cm.brushes.
+local function consider(a, v, ok)
+  if v <= 0x10000000 then return false end
+  local nm = readInteger(a - O_BRUSHES)             -- cm.name if a == &cm.brushes
+  if not nm or nm <= 0x10000 then return false end
+  -- 64, not 32: "maps/mp/jm_ladder_hell_easy.d3dbsp" is 34 characters. Truncated
+  -- at 32 the ".d3dbsp" suffix is cut off, the test fails and `cm` is never
+  -- found -- a silent, map-dependent failure reporting zero candidates.
+  local s = readString(nm, 64)
+  if not (s and s:find("maps/") == 1 and s:find("%.d3dbsp")) then return false end
+  local cm = a - O_BRUSHES
+  if plausible(cm) then ok[#ok+1] = cm return false end
+  return true                                        -- counted as rejected
+end
+
 --- Locates `&cm`: a pointer to a cbrush_t array whose `cm.name` looks like
 --- "maps/.../xxx.d3dbsp" AND whose structure is plausible.
+---
+--- The module is read in 64 KB blocks rather than one `readInteger` per address:
+--- 22 MB / 4 is ~5.6 million cross-process reads, minutes of frozen UI, versus a
+--- few hundred block reads recombined in Lua. Same addresses examined, same
+--- results -- only the number of round trips changes.
 local function findClipMap()
   local ok, rejected = {}, 0
   local mod, ms, sz = findModule()
@@ -93,18 +124,35 @@ local function findClipMap()
     return nil
   end
   print(string.format("module: %s (base 0x%08X, size 0x%X)", mod, ms, sz))
-  for a = ms, ms + sz - 4, 4 do
-    local v = readInteger(a)
-    if v and v > 0x10000000 then
-      local nm = readInteger(a - O_BRUSHES)          -- cm.name if a == &cm.brushes
-      if nm and nm > 0x10000 then
-        local s = readString(nm, 32)
-        if s and s:find("maps/") == 1 and s:find("%.d3dbsp") then
-          local cm = a - O_BRUSHES
-          if plausible(cm) then ok[#ok+1] = cm else rejected = rejected + 1 end
+
+  local CHUNK  = 0x10000                             -- multiple of 4: keeps alignment
+  local last   = ms + sz - 4
+  local blocks = 0
+  local a = ms
+  while a <= last do
+    local n = math.min(CHUNK, last - a + 4)
+    local b = readBytes(a, n, true)                  -- table of bytes, or nil
+    if b then
+      for o = 1, n - 3, 4 do
+        local b3 = b[o + 3]
+        -- cheapest possible pre-filter: only the top byte decides whether the
+        -- little-endian dword can exceed 0x10000000 at all.
+        if b3 and b3 >= 0x10 then
+          local v = b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b3 << 24)
+          if consider(a + o - 1, v, ok) then rejected = rejected + 1 end
         end
       end
+    else
+      -- unreadable page inside the block: fall back address by address so a
+      -- single bad page cannot hide `cm` behind a 64 KB hole.
+      for x = a, a + n - 4, 4 do
+        local v = readInteger(x)
+        if v and consider(x, v, ok) then rejected = rejected + 1 end
+      end
     end
+    a = a + n
+    blocks = blocks + 1
+    if blocks % 8 == 0 then pump() end
   end
   if rejected > 0 then
     print(string.format("  %d candidate(s) rejected: nonsensical counters", rejected))
@@ -156,6 +204,7 @@ for i = 0, numNodes - 1 do
   f:write(F("%d %.9g %.9g %.9g %.9g %d %d %d\n", i,
     readFloat(p), readFloat(p + 4), readFloat(p + 8), readFloat(p + 0x0C),
     readBytes(p + 0x10, 1, false), c0, c1))
+  if i % 4096 == 0 then pump() end
 end
 
 -- cLeaf_t : 44 bytes, mins +0x0C, maxs +0x18, brushContents +0x04,
@@ -167,6 +216,7 @@ for i = 0, numLeafs - 1 do
     readFloat(a + 0x0C), readFloat(a + 0x10), readFloat(a + 0x14),
     readFloat(a + 0x18), readFloat(a + 0x1C), readFloat(a + 0x20),
     readInteger(a + 4), readInteger(a + 0x24)))
+  if i % 4096 == 0 then pump() end
 end
 
 -- cLeafBrushNode_t : 20 bytes, pack(2)
@@ -186,6 +236,7 @@ for i = 0, lbnCount - 1 do
       readBytes(n, 1, false), readFloat(n + 8), readFloat(n + 0x0C),
       readSmallInteger(n + 0x10), readSmallInteger(n + 0x12)))
   end
+  if i % 4096 == 0 then pump() end
 end
 
 -- cbrush_t : 48 bytes  mins +0x00 | contents +0x0C | maxs +0x10
@@ -210,6 +261,7 @@ for i = 0, numBrush - 1 do
     readFloat(a), readFloat(a + 4), readFloat(a + 8),
     readFloat(a + 0x10), readFloat(a + 0x14), readFloat(a + 0x18),
     readInteger(a + 0x0C), #t, table.concat(t, " ")))
+  if i % 2048 == 0 then pump() end
 end
 f:close()
 
@@ -233,25 +285,38 @@ local function maskPlausible(mk)
   return n <= 12
 end
 
-local sig = "00 00 70 C1 00 00 70 C1 00 00 00 00"   -- -15, -15, 0
-local hits = AOBScan(sig, "+W")
-if hits and hits.getCount() > 0 then
+-- This whole block runs AFTER the dump is closed, so a failure here costs only
+-- the mask, never the dump. It is wrapped in pcall for exactly that reason: the
+-- scan runs against live memory, its results shift from one run to the next, and
+-- an unguarded error used to kill the script window with no message at all.
+local maskOk, maskErr = pcall(function()
+  local sig  = "00 00 70 C1 00 00 70 C1 00 00 00 00"  -- -15, -15, 0
+  local hits = AOBScan(sig, "+W")
+  if not hits or hits.getCount() == 0 then
+    print("  tracemask: pm->mins pattern not found (be in-game, with an active player)")
+    if hits then hits.destroy() end
+    return
+  end
   local seen, good = {}, {}
   for i = 0, math.min(hits.getCount() - 1, 60) do
-    local a  = tonumber(hits[i], 16)
-    local pm = a - 0xC4
-    local mk = readInteger(pm + 0x3C)
-    local mz = readFloat(pm + 0xD8)                 -- maxs.z : 70 / 50 / 30
-    if mk and mz and (mz == 70 or mz == 50 or mz == 30) then
-      local k = string.format("0x%08X", mk)
-      if not seen[k] then
-        seen[k] = true
-        if maskPlausible(mk) then
-          good[#good+1] = k
-          print(string.format("  tracemask candidate %s  (pm=0x%08X, maxs.z=%.0f)", k, pm, mz))
-        else
-          print(string.format("  [rejected] 0x%08X: no SOLID bit, or too many bits"
-                              .. " (pm=0x%08X) -- probably a coordinate", mk, pm))
+    -- hits[i] can come back nil: the result list is a snapshot of memory that
+    -- keeps moving under us. Skip, never dereference.
+    local a = hits[i] and tonumber(hits[i], 16)
+    if a then
+      local pm = a - 0xC4
+      local mk = readInteger(pm + 0x3C)
+      local mz = readFloat(pm + 0xD8)               -- maxs.z : 70 / 50 / 30
+      if mk and mz and (mz == 70 or mz == 50 or mz == 30) then
+        local k = string.format("0x%08X", mk)
+        if not seen[k] then
+          seen[k] = true
+          if maskPlausible(mk) then
+            good[#good+1] = k
+            print(string.format("  tracemask candidate %s  (pm=0x%08X, maxs.z=%.0f)", k, pm, mz))
+          else
+            print(string.format("  [rejected] 0x%08X: no SOLID bit, or too many bits"
+                                .. " (pm=0x%08X) -- probably a coordinate", mk, pm))
+          end
         end
       end
     end
@@ -267,6 +332,8 @@ if hits and hits.getCount() > 0 then
   else
     print(string.format("  -> %d plausible masks, AMBIGUOUS: report the anomaly.", #good))
   end
-else
-  print("  tracemask: pm->mins pattern not found (be in-game, with an active player)")
+end)
+if not maskOk then
+  print("  tracemask: recovery FAILED (" .. tostring(maskErr) .. ")")
+  print("  -> the dump above is complete and usable; only the mask is missing.")
 end
