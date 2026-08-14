@@ -533,10 +533,10 @@ def orphans_of(name):
     return out
 
 
-N_WORKERS_NEG = 3      # explicitly capped (not cpu_count()-1): the scan
+DEFAULT_WORKERS = 3      # explicitly capped (not cpu_count()-1): the scan
                         # already uses 25-30% CPU, keep a margin
 
-THRESHOLD_MO = 2500                        # memory ceiling per child process
+MEMORY_CEILING_MB = 2500                        # memory ceiling per child process
 PERIODE_MEM = 5.0
 
 
@@ -767,7 +767,7 @@ def _purge_categories(name, categories):
             w.writerow({k: r.get(k, '') for k in PRODUCTION_COLUMNS})
 
 
-def cmd_map_cost(name, jobs=N_WORKERS_NEG, without_budget=False):
+def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False):
     """PRODUCTION pipeline over ONE COMPLETE map (all its orphan brushes, not
     a sample). RESUMES, NEVER REDOES: a crash or abort only costs whatever
     is not yet written to the CSV, never the whole map. Memory ceiling
@@ -775,7 +775,7 @@ def cmd_map_cost(name, jobs=N_WORKERS_NEG, without_budget=False):
     10-min budget per brush (`_worker_production` -> `_spot_exists_within_budget`,
     already implemented).
 
-    `jobs`: number of workers (default N_WORKERS_NEG=3, settable via
+    `jobs`: number of workers (default DEFAULT_WORKERS=3, settable via
     `production.py --jobs` -- keep a CPU margin, do not go up to
     cpu_count()-1).
 
@@ -843,9 +843,9 @@ def cmd_map_cost(name, jobs=N_WORKERS_NEG, without_budget=False):
             except _queue.Empty:
                 m = memwatch.memory_mo(None)
                 peak_mem = max(peak_mem, m)
-                if m > THRESHOLD_MO:
+                if m > MEMORY_CEILING_MB:
                     print("  !! MEMORY CEILING EXCEEDED (%d Mo > %d) -- stopping, rerun will resume"
-                          % (m, THRESHOLD_MO))
+                          % (m, MEMORY_CEILING_MB))
                     memory_abandoned = True
                     break
                 continue
@@ -942,7 +942,7 @@ def main():
         if len(sys.argv) < 3:
             print("usage: characterize.py map-cost <map> [--jobs N] [--no-budget] [--maps-dir d]")
             return 2
-        jobs = N_WORKERS_NEG
+        jobs = DEFAULT_WORKERS
         if '--jobs' in sys.argv:
             jobs = int(sys.argv[sys.argv.index('--jobs') + 1])
         if '--maps-dir' in sys.argv:

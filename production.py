@@ -44,13 +44,13 @@ ICI = os.path.dirname(os.path.abspath(__file__))
 # characterize.SCRATCH: production.py spawns characterize.py as a subprocess
 # and both read the same CSV.
 SCRATCH = os.environ.get('COD2_OUT_DIR') or os.path.join(ICI, 'scratch')
-JOBS_DEFAUT = 3
+DEFAULT_JOBS = 3
 
 # Rate measured on mp_farmhouse (a clean reference: 1686 brushes, 273s, 3
 # workers). OPTIMISTIC: a brush with a huge domain (>500k columns, over
 # 7 min for the prefilter alone) can multiply this figure locally, unrelated
 # to the brush count. Treat as a floor, not a reliable forecast.
-TAUX_S_PAR_BRUSH = 273.0 / 1686
+SECONDS_PER_BRUSH = 273.0 / 1686
 
 
 def list_maps():
@@ -84,10 +84,10 @@ def cmd_estimate():
             print("%-22s ERROR %s" % (name, e))
             continue
         tot += n
-        print("%-22s %10d %9.1f min" % (name, n, n * TAUX_S_PAR_BRUSH / 60))
+        print("%-22s %10d %9.1f min" % (name, n, n * SECONDS_PER_BRUSH / 60))
     print("\nTOTAL %d orphan brushes, ~%.1f h (OPTIMISTIC estimate -- see the warning"
           " at the top of this script: do not rely on it for a single map, only to"
-          " order the batch)" % (tot, tot * TAUX_S_PAR_BRUSH / 3600))
+          " order the batch)" % (tot, tot * SECONDS_PER_BRUSH / 3600))
     return 0
 
 
@@ -175,7 +175,7 @@ def run_one(name, jobs, without_budget=False, maps_dir=None):
 
 def cmd_run(argv):
     argv = list(argv)
-    jobs = JOBS_DEFAUT
+    jobs = DEFAULT_JOBS
     if '--jobs' in argv:
         jobs = int(argv[argv.index('--jobs') + 1])
     maps_dir = None
@@ -251,7 +251,7 @@ def cmd_selftest(argv=()):
     if os.path.exists(path):
         os.remove(path)
         print("(previous result for %s erased for a full selftest)" % name)
-    ok = run_one(name, JOBS_DEFAUT, maps_dir=maps_dir)
+    ok = run_one(name, DEFAULT_JOBS, maps_dir=maps_dir)
     if ok == 'interrupted':
         return 130
     if not ok:
