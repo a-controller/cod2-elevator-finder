@@ -1,0 +1,10 @@
+# Game content -- never commit any of this
+*.d3dbsp
+*.map
+maps/
+maps/*.txt
+
+# Scan results (written inside the project; override with COD2_OUT_DIR)
+scratch/
+
+__pycache__/
