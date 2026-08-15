@@ -2,7 +2,7 @@
 
     python production.py run <map> [--jobs N] [--no-budget] [--maps-dir d]
     python production.py run --all [--jobs N] [--no-budget] [--maps-dir d]
-    python production.py estimate                 # cost, without launching anything
+    python production.py estimate [--maps-dir d]  # cost, without launching anything
     python production.py budget                   # TOO_BIG/BUDGET_EXCEEDED brushes, sorted by cost
     python production.py selftest [--maps-dir d]  # guard: reruns mp_farmhouse,
                                                     # verifies #3455/#4957 are found
@@ -53,11 +53,38 @@ DEFAULT_JOBS = 3
 SECONDS_PER_BRUSH = 273.0 / 1686
 
 
+def _take_maps_dir(argv):
+    """Pulls `--maps-dir <dir>` out of `argv`, applies it, returns (dir, rest).
+
+    Every command that touches map files goes through this. Parsing the option
+    inside `run` alone was a real bug: `estimate --maps-dir <dir>` silently
+    looked in the default `maps/` next to the scripts and died on a bare
+    FileNotFoundError.
+    """
+    argv = list(argv)
+    maps_dir = None
+    if '--maps-dir' in argv:
+        i = argv.index('--maps-dir')
+        if i + 1 >= len(argv):
+            print("--maps-dir needs a directory")
+            return None, argv
+        maps_dir = argv[i + 1]
+        del argv[i:i + 2]
+        _import_characterize().cm_leafs.set_maps_dir(maps_dir)
+    return maps_dir, argv
+
+
 def list_maps():
     """Memory dumps (`<maps-dir>/*.txt`) + compiled maps with no dump
     (`*.d3dbsp`), the latter via characterize._load_clipmap's disk fallback."""
     c = _import_characterize()
-    names = {f[:-4] for f in os.listdir(c.cm_leafs.maps_dir()) if f.endswith('.txt')}
+    d = c.cm_leafs.maps_dir()
+    if not os.path.isdir(d):
+        raise SystemExit(
+            "maps directory not found: %s\n"
+            "Pass --maps-dir <dir>, set COD2_MAPS_DIR, or create a maps/ "
+            "directory next to these scripts." % d)
+    names = {f[:-4] for f in os.listdir(d) if f.endswith('.txt')}
     for d in c._bsp_dirs():
         if os.path.isdir(d):
             names.update(f[:-7] for f in os.listdir(d) if f.endswith('.d3dbsp'))
@@ -74,7 +101,9 @@ def orphans_count(name):
     return len(c.orphans_of(name))
 
 
-def cmd_estimate():
+def cmd_estimate(argv=()):
+    _take_maps_dir(argv)
+    c = _import_characterize()
     print("%-22s %10s %12s" % ("map", "orphans", "estimate"))
     total = 0
     for name in list_maps():
@@ -83,6 +112,11 @@ def cmd_estimate():
         except Exception as e:
             print("%-22s ERROR %s" % (name, e))
             continue
+        finally:
+            # Each map is visited once here, so characterize's clipmap cache is
+            # pure cost: it never evicts, and over a full maps directory it grew
+            # until the process was killed. Drop it after every map.
+            c.clear_cache()
         total += n
         print("%-22s %10d %9.1f min" % (name, n, n * SECONDS_PER_BRUSH / 60))
     print("\nTOTAL %d orphan brushes, ~%.1f h (OPTIMISTIC estimate -- see the warning"
@@ -257,15 +291,9 @@ def cmd_run(argv):
     jobs = DEFAULT_JOBS
     if '--jobs' in argv:
         jobs = int(argv[argv.index('--jobs') + 1])
-    maps_dir = None
-    if '--maps-dir' in argv:
-        i = argv.index('--maps-dir')
-        maps_dir = argv[i + 1]
-        del argv[i:i + 2]
+    maps_dir, argv = _take_maps_dir(argv)
     without_budget = '--no-budget' in argv
     if '--all' in argv:
-        if maps_dir:
-            _import_characterize().cm_leafs.set_maps_dir(maps_dir)
         targets = list_maps()
         print("%d maps to process (already-done ones skipped automatically), %d workers%s"
               % (len(targets), jobs, "  [NO BUDGET]" if without_budget else ""))
@@ -321,10 +349,7 @@ def cmd_selftest(argv=()):
     cannot benefit from resuming) and checks that #3455 AND #4957 both come
     out with spot=True. This is what makes it possible to trust a result
     without re-running the whole project's history."""
-    argv = list(argv)
-    maps_dir = None
-    if '--maps-dir' in argv:
-        maps_dir = argv[argv.index('--maps-dir') + 1]
+    maps_dir, argv = _take_maps_dir(argv)
     name = 'mp_farmhouse'
     path = os.path.join(SCRATCH, 'production_%s.csv' % name)
     if os.path.exists(path):
@@ -357,7 +382,7 @@ def main():
     if c == 'run':
         return cmd_run(sys.argv[2:])
     if c == 'estimate':
-        return cmd_estimate()
+        return cmd_estimate(sys.argv[2:])
     if c == 'budget':
         return cmd_budget()
     if c == 'selftest':

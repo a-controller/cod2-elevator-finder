@@ -517,6 +517,17 @@ def get_map(name):
     return _CACHE[name]
 
 
+def clear_cache():
+    """Drops every loaded clipmap and Detector.
+
+    The cache pays off while a scan hammers ONE map, but it never evicts. A
+    caller that walks many maps in a row, touching each once, accumulates all
+    of them in memory: `production.py estimate` over a full maps directory was
+    killed by the OOM reaper this way. Such callers must clear between maps.
+    """
+    _CACHE.clear()
+
+
 # --------------------------------------------------------------- orphans (neg)
 
 def orphans_of(name):
