@@ -91,6 +91,53 @@ def cmd_estimate():
     return 0
 
 
+# 8 decimals, not 6: at 6, rounding moved the float32 for 15 of the 3643
+# coordinates measured so far (small values near zero, where float32 resolves
+# finer than 5e-7). 8 is the first width that leaves every one of them
+# untouched, and map coordinates stay far below the magnitude where it would
+# stop being enough.
+COORD = "%.8f"
+
+
+def _ansi():
+    """ANSI color codes, or empty strings when coloring would be wrong.
+
+    Colors are opt-out in three ways, because a public tool gets redirected:
+    `NO_COLOR` (the de facto standard), a non-tty stdout (`> results.txt` must
+    not collect escape sequences), and a Windows console that refuses to switch
+    its virtual-terminal mode on.
+    """
+    off = {k: "" for k in ("dim", "bold", "good", "warn", "head", "off")}
+    if os.environ.get("NO_COLOR") or not sys.stdout.isatty():
+        return off
+    if os.name == "nt":
+        try:
+            import ctypes
+            h = ctypes.windll.kernel32.GetStdHandle(-11)
+            mode = ctypes.c_uint32()
+            if not ctypes.windll.kernel32.GetConsoleMode(h, ctypes.byref(mode)):
+                return off
+            # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            if not ctypes.windll.kernel32.SetConsoleMode(h, mode.value | 0x0004):
+                return off
+        except Exception:
+            return off
+    return {"dim": "\033[2m", "bold": "\033[1m", "good": "\033[32m",
+            "warn": "\033[33m", "head": "\033[36m", "off": "\033[0m"}
+
+
+def _table(headers, rows, aligns):
+    """Column-aligned lines. Widths come from the content, so a long map name
+    or a 5-digit coordinate never breaks the alignment."""
+    cols = list(zip(*([headers] + rows))) if rows else [(h,) for h in headers]
+    w = [max(len(str(c)) for c in col) for col in cols]
+    def line(cells):
+        return "  ".join(
+            (str(c).rjust(w[i]) if aligns[i] == "r" else str(c).ljust(w[i]))
+            for i, c in enumerate(cells)).rstrip()
+    return line(headers), [line(r) for r in rows]
+
+
 def _verdict(name):
     """Human-readable verdict line. Priority given to the EXACT origin (full
     floating-point precision, to be written directly into memory via an
@@ -115,26 +162,58 @@ def _verdict(name):
     divergences = [r for r in rows if r.get('spot') == 'DIVERGENCE']
     budget = sum(1 for r in rows if r.get('spot') == 'BUDGET_EXCEEDED')
     too_big = sum(1 for r in rows if r.get('spot') == 'TOO_BIG')
-    print("\nVERDICT %s : %d spots, %d DIVERGENCE, %d BUDGET_EXCEEDED, %d TOO_BIG"
-          % (name, len(spots), len(divergences), budget, too_big))
+    c = _ansi()
+
+    def amplitude(r):
+        try:
+            return float(r['run_delta0_max'])
+        except (TypeError, ValueError):
+            return 0.0
+
+    # Highest rise first: that is the one worth trying in-game first.
+    spots = sorted(spots, key=amplitude, reverse=True)
+    divergences = sorted(divergences, key=amplitude, reverse=True)
+
+    print("\n%sVERDICT %s%s : %s%d spots%s, %d DIVERGENCE, %d BUDGET_EXCEEDED, %d TOO_BIG"
+          % (c["bold"], name, c["off"],
+             c["good"] if spots else "", len(spots), c["off"],
+             len(divergences), budget, too_big))
     print("  (%d orphan brushes processed, %d kept by the prefilter)" % (n, kept))
-    for r in spots:
-        x, y, z = float(r['x_col']), float(r['y_col']), float(r['z_col'])
-        print("  brush #%-8s run_delta0_max=%s" % (r['brush_id'], r['run_delta0_max']))
-        print("     origin (CE, Float) : x=%r  y=%r  z=%r" % (x, y, z))
-        print("     setviewpos %.0f %.0f %.0f   (approximate -- may not trigger, rounded)"
-              % (x, y, z + 60))
+
+    def coord_rows(rs):
+        out = []
+        for r in rs:
+            x, y, z = float(r['x_col']), float(r['y_col']), float(r['z_col'])
+            out.append(["#" + str(r['brush_id']), r['run_delta0_max'],
+                        COORD % x, COORD % y, COORD % z,
+                        "setviewpos %.0f %.0f %.0f 0" % (x, y, z + 60)])
+        return out
+
+    ALIGN = ["l", "r", "r", "r", "r", "l"]
+    HEAD = ["brush", "rise", "x", "y", "z", "console (approximate)"]
+
+    if spots:
+        head, lines = _table(HEAD, coord_rows(spots), ALIGN)
+        print("\n  %s%s%s" % (c["head"], head, c["off"]))
+        for l in lines:
+            print("  %s%s%s" % (c["good"], l, c["off"]))
+        print("  %sx/y/z are exact, write them straight into memory. `setviewpos` is"
+              " rounded and may miss the column; the trailing 0 is the yaw the"
+              " command requires.%s" % (c["dim"], c["off"]))
+
     if divergences:
-        print("  WARNING -- brushes in DIVERGENCE (pipeline >= MIN_STEP, but `detect.py check()`"
-              " does not confirm -- NEITHER spot NOR negative, needs manual review):")
-        for r in divergences:
-            print("     brush #%-8s run_delta0_max=%s  (x=%s, y=%s, z=%s)"
-                  % (r['brush_id'], r['run_delta0_max'], r['x_col'], r['y_col'], r['z_col']))
+        print("\n  %sDIVERGENCE -- pipeline >= MIN_STEP, but `detect.py check()` does not"
+              " confirm. NEITHER spot NOR negative: needs manual review.%s"
+              % (c["warn"], c["off"]))
+        head, lines = _table(HEAD, coord_rows(divergences), ALIGN)
+        print("  %s%s%s" % (c["head"], head, c["off"]))
+        for l in lines:
+            print("  %s%s%s" % (c["warn"], l, c["off"]))
     if budget or too_big:
-        print("  (%d BUDGET_EXCEEDED + %d TOO_BIG : NOT measured, do not read them as"
+        print("\n  %s%d BUDGET_EXCEEDED + %d TOO_BIG : NOT measured, do not read them as"
               " negatives -- `python production.py budget` to list them, `run <map>"
-              " --no-budget` for the catch-up pass.)"
-              % (budget, too_big))
+              " --no-budget` for the catch-up pass.%s"
+              % (c["dim"], budget, too_big, c["off"]))
 
 
 def run_one(name, jobs, without_budget=False, maps_dir=None):
