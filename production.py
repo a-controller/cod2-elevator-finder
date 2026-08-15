@@ -38,12 +38,12 @@ import subprocess
 import sys
 import time
 
-ICI = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.abspath(__file__))
 # Results directory, INSIDE the project directory. Override with the
 # COD2_OUT_DIR environment variable. Must stay identical to
 # characterize.SCRATCH: production.py spawns characterize.py as a subprocess
 # and both read the same CSV.
-SCRATCH = os.environ.get('COD2_OUT_DIR') or os.path.join(ICI, 'scratch')
+SCRATCH = os.environ.get('COD2_OUT_DIR') or os.path.join(HERE, 'scratch')
 DEFAULT_JOBS = 3
 
 # Rate measured on mp_farmhouse (a clean reference: 1686 brushes, 273s, 3
@@ -260,7 +260,7 @@ def run_one(name, jobs, without_budget=False, maps_dir=None):
     that (instead of killing immediately, as `subprocess.run()` would) lets
     the child's message be the only one printed -- returns the string
     'interrupted' instead of a bool so the caller knows not to print its own."""
-    cmd = [sys.executable, '-u', os.path.join(ICI, 'characterize.py'), 'map-cost', name,
+    cmd = [sys.executable, '-u', os.path.join(HERE, 'characterize.py'), 'map-cost', name,
            '--jobs', str(jobs)]
     if without_budget:
         cmd.append('--no-budget')
@@ -268,7 +268,7 @@ def run_one(name, jobs, without_budget=False, maps_dir=None):
         cmd += ['--maps-dir', maps_dir]
     print("\n=== %s%s ===" % (name, "  [NO BUDGET]" if without_budget else ""))
     t0 = time.time()
-    p = subprocess.Popen(cmd, cwd=ICI)
+    p = subprocess.Popen(cmd, cwd=HERE)
     try:
         rc = p.wait()
     except KeyboardInterrupt:
@@ -297,14 +297,14 @@ def cmd_run(argv):
         targets = list_maps()
         print("%d maps to process (already-done ones skipped automatically), %d workers%s"
               % (len(targets), jobs, "  [NO BUDGET]" if without_budget else ""))
-        tout_ok = True
+        all_ok = True
         for i, name in enumerate(targets, 1):
             print("\n[%d/%d]" % (i, len(targets)), end=' ')
             r = run_one(name, jobs, without_budget, maps_dir)
             if r == 'interrupted':
                 return 130
-            tout_ok &= r
-        return 0 if tout_ok else 1
+            all_ok &= r
+        return 0 if all_ok else 1
     if not argv or argv[0].startswith('--'):
         print("usage: production.py run <map> [--jobs N] [--no-budget] [--maps-dir d]  |"
               "  run --all [--jobs N] [--no-budget] [--maps-dir d]")
@@ -363,9 +363,9 @@ def cmd_selftest(argv=()):
         return 1
     with open(path, newline='') as fh:
         rows = {int(r['brush_id']): r for r in csv.DictReader(fh)}
-    attendus = (3455, 4957)
+    expected = (3455, 4957)
     passed = True
-    for b in attendus:
+    for b in expected:
         r = rows.get(b)
         found = r is not None and r.get('spot') == 'True'
         passed &= found

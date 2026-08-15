@@ -115,20 +115,20 @@ class Detector(object):
 
     # ------------------------------------------------------------ critere
 
-    def climb(self, origin, limite=400, deja_solide=False):
+    def climb(self, origin, limit=400, already_solid=False):
         """Simulates the engine's loop. Returns (n_steps, final_z, delta0).
 
-        `deja_solide`: the caller has just checked `ground_allsolid` on
+        `already_solid`: the caller has just checked `ground_allsolid` on
         `origin` and avoids redoing it on the first round. The scan used to
         test the same swept trace twice in a row on every position reaching
         `climb()` — 11% of positions in 'full' mode. No change in
         semantics: it is exactly the same test, simply not redone."""
         big = boxes()[0]
         pos, n, first = origin, 0, None
-        saute = deja_solide
-        while n < limite:
-            if saute:
-                saute = False
+        skip = already_solid
+        while n < limit:
+            if skip:
+                skip = False
             elif not self.ground_allsolid(pos, big):
                 break
             idx, point = self.correct_all_solid(pos, big)
@@ -275,7 +275,7 @@ class Detector(object):
                 continue
             if not RELAX and self.ground_allsolid(p, small):
                 continue
-            n, z, d = self.climb(p, deja_solide=True)
+            n, z, d = self.climb(p, already_solid=True)
             if n >= MIN_STEP:
                 hits.append((p, n, z, d))
             if verbose and (i + 1) % 50000 == 0:
@@ -331,7 +331,7 @@ def _worker_chunk(chunk):
             continue
         if not RELAX and d.ground_allsolid(p, small):
             continue
-        n, z, dd = d.climb(p, deja_solide=True)
+        n, z, dd = d.climb(p, already_solid=True)
         if n >= MIN_STEP:
             out.append((i, p, n, z, dd))
     return out

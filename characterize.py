@@ -204,27 +204,27 @@ def _optimize_column(cols, evaluate, refine=True):
         if best_col is None:
             break
         bx, by = best_col
-        fin = set()
+        refined = set()
         xr = bx - REFINE_RADIUS
         while xr <= bx + REFINE_RADIUS:
             yr = by - REFINE_RADIUS
             while yr <= by + REFINE_RADIUS:
-                fin.add((xr, yr))
+                refined.add((xr, yr))
                 yr += 1.0
             xr += 1.0
-        fin -= tested
-        if not fin:
+        refined -= tested
+        if not refined:
             break
-        nouveau_col = None
-        for (x, y) in fin:
+        new_col = None
+        for (x, y) in refined:
             r = evaluate(x, y)
             if r[0] > best[0]:
-                best, nouveau_col = r, (x, y)
-        tested |= fin
-        n_tested += len(fin)
-        if nouveau_col is None:
+                best, new_col = r, (x, y)
+        tested |= refined
+        n_tested += len(refined)
+        if new_col is None:
             break            # no improvement: at a local peak
-        best_col = nouveau_col
+        best_col = new_col
 
     return best, best_col, n_tested
 
@@ -725,7 +725,7 @@ def _spot_exists_with_estimate(name, b, without_budget=False):
     return row
 
 
-def _worker_production(q_taches, q_resultats, without_budget=False):
+def _worker_production(q_taches, q_results, without_budget=False):
     import signal
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     while True:
@@ -734,7 +734,7 @@ def _worker_production(q_taches, q_resultats, without_budget=False):
             break
         name, b = item
         row = _spot_exists_with_estimate(name, b, without_budget=without_budget)
-        q_resultats.put(row)
+        q_results.put(row)
 
 
 PRODUCTION_JOURNAL_PATH = os.path.join(SCRATCH, 'production_journal.txt')
@@ -814,17 +814,17 @@ def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False):
     if without_budget:
         _purge_categories(name, CATEGORIES_A_REJOUER)
     out_path = os.path.join(SCRATCH, 'production_%s.csv' % name)
-    ecrire_entete = not os.path.exists(out_path)
+    write_header = not os.path.exists(out_path)
 
     ctx = mp.get_context('spawn')
     q_taches = ctx.Queue()
-    q_resultats = ctx.Queue()
+    q_results = ctx.Queue()
     for b in remaining:
         q_taches.put((name, b))
     for _ in range(jobs):
         q_taches.put(None)
 
-    workers = [ctx.Process(target=_worker_production, args=(q_taches, q_resultats, without_budget))
+    workers = [ctx.Process(target=_worker_production, args=(q_taches, q_results, without_budget))
                for _ in range(jobs)]
     for w in workers:
         w.start()
@@ -837,16 +837,16 @@ def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False):
 
     fh = open(out_path, 'a', newline='')
     w_csv = csv.DictWriter(fh, fieldnames=PRODUCTION_COLUMNS)
-    if ecrire_entete:
+    if write_header:
         w_csv.writeheader()
         fh.flush()
 
     t0 = time.time()
     n_done = 0
-    tot_prefilter = 0.0
-    tot_sweep = 0.0
+    total_prefilter = 0.0
+    total_sweep = 0.0
     domains = []
-    n_survivors_tot = 0
+    n_survivors_total = 0
     n_spots = 0
     n_budget_exceeded = 0
     n_too_big = 0
@@ -856,7 +856,7 @@ def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False):
     try:
         while n_done < len(remaining):
             try:
-                row = q_resultats.get(timeout=PERIODE_MEM)
+                row = q_results.get(timeout=PERIODE_MEM)
             except _queue.Empty:
                 m = memwatch.memory_mb(watched)
                 peak_mem = max(peak_mem, m)
@@ -878,11 +878,11 @@ def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False):
                 print("  !! BUDGET EXCEEDED: %s #%s (>%d min) -- marked, not measured"
                       % (row['map'], row['brush_id'], BUDGET_BRUSH_S // 60))
             else:
-                tot_prefilter += row['t_prefilter']
-                tot_sweep += row['t_sweep']
+                total_prefilter += row['t_prefilter']
+                total_sweep += row['t_sweep']
                 domains.append(row['n_domain_columns'])
                 if row['n_survivors'] >= 1:
-                    n_survivors_tot += 1
+                    n_survivors_total += 1
                 if row['spot'] == 'DIVERGENCE':
                     n_divergence += 1
                     print("  !! DIVERGENCE: %s #%s  run_delta0_max=%s  (%.0f, %.0f) --"
@@ -935,10 +935,10 @@ def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False):
     print("brushes processed this round : %d/%d remaining (%d already done before, %d total on the map)"
           % (n_done, len(remaining), len(already_done), len(brushes_all)))
     print("duration (wall, %d workers) : %.0fs (%.1f min)" % (jobs, dt_total, dt_total / 60))
-    print("CUMULATIVE prefilter time (step 1, this round) : %.0fs (%.1f min)" % (tot_prefilter, tot_prefilter / 60))
-    print("CUMULATIVE full-scan time (step 2, this round) : %.0fs (%.1f min)" % (tot_sweep, tot_sweep / 60))
+    print("CUMULATIVE prefilter time (step 1, this round) : %.0fs (%.1f min)" % (total_prefilter, total_prefilter / 60))
+    print("CUMULATIVE full-scan time (step 2, this round) : %.0fs (%.1f min)" % (total_sweep, total_sweep / 60))
     print("brushes kept by the prefilter (n_survivors>=1) : %d/%d (%.1f%%)"
-          % (n_survivors_tot, n_done, 100.0 * n_survivors_tot / max(1, n_done)))
+          % (n_survivors_total, n_done, 100.0 * n_survivors_total / max(1, n_done)))
     print("domain size (columns) : median=%d  mean=%.0f  min=%d  max=%d"
           % (median, average, domains[0] if n else 0, domains[-1] if n else 0))
     print()
