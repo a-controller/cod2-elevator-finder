@@ -29,10 +29,12 @@ point path, the correction "fixes" a solid state the point test cannot see,
 and pushes the player up by +1 unit. This repeats on every frame the
 condition holds, which turns a one-off nudge into a real vertical climb.
 
-The scanner searches every orphan brush (one the swept path can reach but
-the point path's leaf listing does not carry) for a column and a Z range
-where that escape happens over a long enough consecutive run to be a genuine
-climb rather than a single-step artifact.
+The scanner searches every orphan brush for a position where the brush is in
+the swept path's set and absent from the point path's, then confirms with the
+engine's own loop: it replays `climb()` and keeps the position only if the
+player really rises for at least `MIN_STEP` steps. Counting escapes at a fixed
+column, as an earlier version did, is not equivalent -- a climb that drifts
+sideways leaves the column, and a sideways shove can look like a climb.
 
 ## Quick start
 
@@ -46,15 +48,23 @@ That prints a verdict per brush and writes `scratch/production_mp_farmhouse.csv`
 A confirmed spot looks like this:
 
 ```
-brush #4957      run_delta0_max=64.0
-   origin (CE, Float) : x=283.875  y=125.073719  z=252.5
-   setviewpos 284 125 313   (approximate -- may not trigger, rounded)
+  brush  shape      rise              x             y             z  console (approximate)
+  #4957  non-axial  64.0  -505.17956500  155.23902900   92.50000000  setviewpos -505 155 152 0
+  #3455  non-axial  34.0   283.87500000  165.07371900  218.50000000  setviewpos 284 165 278 0
 ```
 
-The `origin` line is the exact position, at full floating-point precision.
-Use it if you can write coordinates directly into memory. The `setviewpos`
-line is the in-game console command, but the console does not accept
-decimals, and rounding alone is sometimes enough to miss the column.
+Spots are listed highest climb first. `x`, `y` and `z` are exact: write them
+straight into memory if you have a tool for that. The `setviewpos` line is the
+in-game console command, but the console does not accept decimals, and
+rounding alone is sometimes enough to miss the column. Its trailing `0` is the
+yaw the command requires.
+
+**That command does not scan the whole map.** By default it only looks at
+brushes that have at least one non-axial plane, which is where every spot
+found so far lives. To cover purely axis-aligned brushes too, add
+`--brushes both`. It costs little and re-scans nothing you already did, but
+read "Axial brushes" first: no axial spot has been found yet, so this is an
+open question rather than a setting you should always turn on.
 
 The scan runs on three worker processes by default. On a machine you want to
 keep using while it works, or one that is short on cores or memory, lower it:
@@ -121,8 +131,10 @@ as a lower bound rather than a complete result.
 
 ```
 python production.py run <map> [--jobs N] [--no-budget] [--maps-dir d]
+                               [--brushes non-axial|axial|both] [--budget SECONDS]
 python production.py run --all [--jobs N] [--no-budget] [--maps-dir d]
-python production.py estimate
+                               [--brushes non-axial|axial|both] [--budget SECONDS]
+python production.py estimate [--maps-dir d]
 python production.py budget
 python production.py selftest [--maps-dir d]
 ```
@@ -139,6 +151,8 @@ a crash or an abort only costs the brush in progress.
 | `--jobs N` | worker processes, default 3. More is faster, but when two columns tie on the same score, which one gets reported is not reproducible. Peak memory is measured across the scan's own processes: 154 MB on `mp_farmhouse` (1686 brushes, 3 workers). Heavier maps use more, against a 2.5 GB ceiling that stops the run; re-running resumes from the CSV. Windows only, see Known limitations. |
 | `--all` | every map found in the maps directory instead of a single one. |
 | `--no-budget` | catch-up pass. Re-runs only the brushes previously marked `TOO_BIG` or `BUDGET_EXCEEDED`, with no time budget. Run `budget` first to see what is waiting. |
+| `--brushes <kind>` | which brushes to consider, by their own shape: `non-axial` (default), `axial`, or `both`. See "Axial brushes" below. |
+| `--budget SECONDS` | runtime allowed per brush before it is marked `BUDGET_EXCEEDED`, default 5. See "The per-brush budget". |
 
 `estimate` prints the cost of a full run without launching anything.
 `budget` lists the brushes that were skipped for being too expensive, sorted
@@ -197,13 +211,67 @@ The CSV has one row per orphan brush. The columns that matter:
 |---|---|
 | `brush_id` | the brush's index in the map's collision data |
 | `spot` | `True` for a confirmed spot, `DIVERGENCE` when the pipeline and `detect.py` disagree, `TOO_BIG` or `BUDGET_EXCEEDED` when the brush was skipped as too expensive |
-| `run_delta0_max` | height of the climb, in units. This is the predicate. |
+| `run_delta0_max` | height of the climb, in units (one engine step = +1 unit). The name is historical: the verdict is now the real `climb()` loop, not the escape run it used to count. |
 | `x_col`, `y_col`, `z_col` | the position that triggers it |
 | `n_survivors` | columns that passed the prefilter for this brush |
+| `brush_kind` | `axial` or `non-axial`, the brush's own shape. Absent from CSVs written before this column existed, where it reads as `?`. |
 
 `TOO_BIG` and `BUDGET_EXCEEDED` are **not** negatives. Those brushes were
 never measured. Use `budget` to list them and `run <map> --no-budget` to
 work through them.
+
+## The per-brush budget
+
+A few brushes have a huge search domain and would occupy a worker for a very
+long time. Each one gets a runtime budget, 5 seconds by default; past that it
+is written as `BUDGET_EXCEEDED` and the scan moves on.
+
+That default is measured, not guessed. A brush that carries an elevator is
+cheap, because the search stops at the first confirmed column: across every
+map measured, the slowest one costs **0.80s**, median 0.12s, p90 0.28s. The
+expensive brushes are the negatives, which have to exhaust every column. On
+`jm_zoop` the budget changes the runtime and the number of unmeasured brushes,
+but never the verdict -- the same 36 spots and 8 divergences at 3s, 5s, 10s and
+120s. So a higher budget buys no elevator; it only settles negatives.
+
+Raise it if you want to settle that tail:
+
+```
+python production.py run <map> --budget 120 --maps-dir "C:\path\to\your\maps"
+```
+
+Two things to know. A brush already recorded as `BUDGET_EXCEEDED` is skipped by
+the resume, so raising the budget alone will not revisit it: combine with
+`--no-budget`, which re-runs exactly those brushes. And the budget is not the
+only way a brush ends up unmeasured: `TOO_BIG` comes either from an *estimated*
+cost above 600s, or from a search domain wider than `MAX_DOMAIN_COLUMNS`
+(100,000 columns), a memory guard. The largest domain that ever produced a spot
+is 35,631 columns.
+
+## Axial brushes
+
+By default the scan only considers brushes that have at least one non-axial
+plane. That filter is historical, and it is a selection effect rather than a
+finding: what makes the climb possible is the 2048-unit margin the engine
+applies to a non-axial BSP **node** plane, which says nothing about the shape
+of the brush you end up standing on. A plain axis-aligned box can sit under
+such a node just as well.
+
+```
+python production.py run <map> --brushes axial   --maps-dir "C:\path\to\your\maps"
+python production.py run <map> --brushes both    --maps-dir "C:\path\to\your\maps"
+```
+
+Axial candidates are a minority: 45 against 418 on `mp_trainstation`, 114
+against 2718 on `crossroads`, 317 against 1686 on `mp_farmhouse`. And because the CSV resume
+skips whatever is already recorded, the passes compose: running a map with the
+default and then again with `--brushes axial` measures every brush exactly
+once, and re-scans nothing.
+
+Axial spots do exist, and they are rare: 3 found across roughly 9,000 axial
+brushes measured, against 87 for 61,000 non-axial ones. One of them,
+`cor27_intoxication` #2311, is a purely axial slab carrying a 74-unit climb,
+confirmed in game.
 
 ## Known limitations
 
@@ -220,10 +288,9 @@ work through them.
   and `y_col` between two runs on the same input, even with `--jobs 1`.
   That is optimizer noise on near-equal candidates, not a correctness
   problem. The reported column is still a valid spot.
-* **Only brushes with at least one non-axial plane are examined.** The
-  candidate enumeration skips purely axial brushes. Every spot found so far
-  has a non-axial plane, but that is partly a consequence of what was
-  looked at, so a purely axial spot would not be found by this tool as it
-  stands.
+* **Purely axial brushes are skipped by default.** Every spot found so far
+  has a non-axial plane, but that is partly a consequence of what was looked
+  at. Pass `--brushes axial` or `--brushes both` to include them; see "Axial
+  brushes".
 * **A result is only ever a candidate.** Confirm it in-game before treating
   it as real.

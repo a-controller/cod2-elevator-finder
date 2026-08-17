@@ -1,7 +1,9 @@
 """Production launcher -- the `spot_exists` pipeline over a set of maps.
 
     python production.py run <map> [--jobs N] [--no-budget] [--maps-dir d]
+                                  [--brushes non-axial|axial|both]
     python production.py run --all [--jobs N] [--no-budget] [--maps-dir d]
+                                   [--brushes non-axial|axial|both]
     python production.py estimate [--maps-dir d]  # cost, without launching anything
     python production.py budget                   # TOO_BIG/BUDGET_EXCEEDED brushes, sorted by cost
     python production.py selftest [--maps-dir d]  # guard: reruns mp_farmhouse,
@@ -218,13 +220,16 @@ def _verdict(name):
         out = []
         for r in rs:
             x, y, z = float(r['x_col']), float(r['y_col']), float(r['z_col'])
-            out.append(["#" + str(r['brush_id']), r['run_delta0_max'],
+            # Older CSVs have no brush_kind column: report it as unknown
+            # rather than guessing a shape that was never recorded.
+            out.append(["#" + str(r['brush_id']), r.get('brush_kind') or "?",
+                        r['run_delta0_max'],
                         COORD % x, COORD % y, COORD % z,
                         "setviewpos %.0f %.0f %.0f 0" % (x, y, z + 60)])
         return out
 
-    ALIGN = ["l", "r", "r", "r", "r", "l"]
-    HEAD = ["brush", "rise", "x", "y", "z", "console (approximate)"]
+    ALIGN = ["l", "l", "r", "r", "r", "r", "l"]
+    HEAD = ["brush", "shape", "rise", "x", "y", "z", "console (approximate)"]
 
     if spots:
         head, lines = _table(HEAD, coord_rows(spots), ALIGN)
@@ -250,7 +255,8 @@ def _verdict(name):
               % (c["dim"], budget, too_big, c["off"]))
 
 
-def run_one(name, jobs, without_budget=False, maps_dir=None):
+def run_one(name, jobs, without_budget=False, maps_dir=None, kind='non-axial',
+            budget_s=None):
     """Runs `characterize.py map-cost <name>` as a child process.
 
     `Popen`+`wait()`, not `subprocess.run()`: on Ctrl+C, both this process
@@ -266,6 +272,10 @@ def run_one(name, jobs, without_budget=False, maps_dir=None):
         cmd.append('--no-budget')
     if maps_dir:
         cmd += ['--maps-dir', maps_dir]
+    if kind != 'non-axial':
+        cmd += ['--brushes', kind]
+    if budget_s is not None:
+        cmd += ['--budget', str(budget_s)]
     print("\n=== %s%s ===" % (name, "  [NO BUDGET]" if without_budget else ""))
     t0 = time.time()
     p = subprocess.Popen(cmd, cwd=HERE)
@@ -292,6 +302,27 @@ def cmd_run(argv):
     if '--jobs' in argv:
         jobs = int(argv[argv.index('--jobs') + 1])
     maps_dir, argv = _take_maps_dir(argv)
+    budget_s = None
+    if '--budget' in argv:
+        i = argv.index('--budget')
+        try:
+            budget_s = float(argv[i + 1])
+        except (IndexError, ValueError):
+            print("--budget needs a positive number of seconds")
+            return 2
+        del argv[i:i + 2]
+        if budget_s <= 0:
+            print("--budget needs a positive number of seconds")
+            return 2
+    kind = 'non-axial'
+    if '--brushes' in argv:
+        i = argv.index('--brushes')
+        kind = argv[i + 1] if i + 1 < len(argv) else ''
+        del argv[i:i + 2]
+        c = _import_characterize()
+        if kind not in c.BRUSH_KINDS:
+            print("--brushes must be one of %s" % (c.BRUSH_KINDS,))
+            return 2
     without_budget = '--no-budget' in argv
     if '--all' in argv:
         targets = list_maps()
@@ -300,16 +331,17 @@ def cmd_run(argv):
         all_ok = True
         for i, name in enumerate(targets, 1):
             print("\n[%d/%d]" % (i, len(targets)), end=' ')
-            r = run_one(name, jobs, without_budget, maps_dir)
+            r = run_one(name, jobs, without_budget, maps_dir, kind, budget_s)
             if r == 'interrupted':
                 return 130
             all_ok &= r
         return 0 if all_ok else 1
     if not argv or argv[0].startswith('--'):
-        print("usage: production.py run <map> [--jobs N] [--no-budget] [--maps-dir d]  |"
-              "  run --all [--jobs N] [--no-budget] [--maps-dir d]")
+        print("usage: production.py run <map> [--jobs N] [--no-budget]"
+              " [--budget SECONDS] [--brushes non-axial|axial|both]"
+              " [--maps-dir d]  |  run --all [...]")
         return 2
-    ok = run_one(argv[0], jobs, without_budget, maps_dir)
+    ok = run_one(argv[0], jobs, without_budget, maps_dir, kind, budget_s)
     if ok == 'interrupted':
         return 130
     return 0 if ok else 1

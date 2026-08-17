@@ -95,12 +95,29 @@ class Detector(object):
 
     def ground_allsolid(self, origin, maxs):
         """PM_GroundTrace: sweep origin+0.25 -> origin-0.25."""
+        nums = self.ground_sweep_brushes(origin, maxs)
+        return self.ground_allsolid_from_sweep(origin, maxs, nums)
+
+    def ground_sweep_brushes(self, origin, maxs):
+        """The brush set `brushes_for_sweep` selects for PM_GroundTrace's
+        sweep (origin+0.25 -> origin-0.25) -- the cheap half of the trace,
+        split out so callers needing only set membership (e.g. `b in
+        sweep` asymmetry tests) can skip the costly `planes_of` + trace
+        below when `b` turns out not to be in it."""
         cm = self.cm
         start = (origin[0], origin[1], origin[2] + 0.25)
         end = (origin[0], origin[1], origin[2] - 0.25)
-        nums = cm.brushes_for_sweep(start, end, PLAYER_MINS, maxs, MASK)
+        return cm.brushes_for_sweep(start, end, PLAYER_MINS, maxs, MASK)
+
+    def ground_allsolid_from_sweep(self, origin, maxs, nums):
+        """Finishes the trace `ground_sweep_brushes` started: builds the
+        planes for the already-computed brush set `nums` and runs the
+        sweep, returning `allsolid`."""
+        cm = self.cm
+        start = (origin[0], origin[1], origin[2] + 0.25)
+        end = (origin[0], origin[1], origin[2] - 0.25)
         return player_trace(start, end, PLAYER_MINS, maxs,
-                            cm.planes_of(nums))['allsolid']
+                             cm.planes_of(nums))['allsolid']
 
     def correct_all_solid(self, origin, maxs):
         """PM_CorrectAllSolid: 26 deltas tested via POINT traces."""

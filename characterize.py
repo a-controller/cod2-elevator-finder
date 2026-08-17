@@ -5,29 +5,41 @@
 Imports `cm_leafs.py`, `cm_faithful.py`, `detect.py` READ-ONLY, does not
 modify them.
 
-`vertical_extent_asym` (condition b alone, on a single isolated brush) is
-not sufficient by itself and does not always even point at the right column
-(#6453: extent 217, higher than the 4 known positives, yet no point of ITS
-winning column escapes via index 0 -- verified with `detect.py`, an
-independent instrument, on the column AND on the 6 relevant levels: a known
-1-step artifact, not a spot).
+Hierarchy of the production pipeline:
 
-New hierarchy:
-  vertical_extent_asym  PREFILTER / search domain (b is necessary for
-                           index 0 to escape -- a cheap superset).
-  run_delta0_max           THE PREDICATE. Longest CONSECUTIVE run of z (step
-                           DZ) where PM_CorrectAllSolid escapes precisely via
-                           index 0 ({0,0,1}, tested directly, not all 26 --
-                           exact per the source: tried first, taken if it
-                           escapes). This is (a)^(b)^(c)^(d) directly,
-                           comparable term for term to ground truth's `step`
-                           -- not a proxy. Optimized by the SAME machinery
-                           (grid+edges then iterative local walk), over the
-                           SAME domain of columns as vertical_extent_asym,
-                           but with its own objective: the two legitimately
-                           peak at different columns.
+  condition_b_geom + `b in brushes_for_sweep`
+                        SEARCH. The asymmetry that makes an elevator possible:
+                        the box is inside b, the point probe does not list b,
+                        and the swept probe does. Requiring the sweep term is
+                        what stops a big under-listed brush from being credited
+                        with a neighbour's elevator.
+
+  _column_has_potential SEARCH, widened to the 9 upward deltas. A prefilter
+                        only has to avoid false negatives, so a superset is
+                        legitimate here -- and necessary: restricting it to
+                        index 0 under-explores and loses real spots (jm_zoop,
+                        8 of them, confirmed in game).
+
+  _best_climb_at_column THE VERDICT: the real `climb()`, i.e. the engine loop,
+                        run from the start of every escape run. It replaces
+                        `run_delta0_max`, a proxy that counted escapes at a
+                        FIXED column and was wrong in BOTH directions -- it
+                        missed climbs that mix deltas (the player leaves the
+                        column) and, widened, invented climbs where the player
+                        is merely shoved sideways once. Both failure modes were
+                        checked in game.
+
+`run_delta0_max` survives as the CSV column name only; it now carries a
+`climb()` STEP COUNT, not a run length. The name is kept for one release so
+existing CSVs stay readable.
+
+`vertical_extent_asym` (condition b alone, on a single isolated brush) is not
+sufficient by itself and does not always even point at the right column
+(#6453: extent 217, higher than the 4 known positives, yet no point of ITS
+winning column escapes via index 0).
 """
 import csv
+import math
 import os
 import random
 import sys
@@ -91,11 +103,18 @@ def build_listed_orphan_index(cm, mask):
 
 # ------------------------------------------------------------- the core measurement
 
-def condition_b(cm, b, planes, x, y, z, maxs):
-    """Asymmetry EVALUATED AT POINT (x, y, z): the point is geometrically
-    inside brush b (test_box_in_brush, exact point path), BUT b does not
-    appear in the leafs the point probe selects at that point
-    (brushes_for_point, cm_leafs.py:280-292)."""
+def condition_b_geom(cm, b, planes, x, y, z, maxs):
+    """Cheap half of the asymmetry test EVALUATED AT POINT (x, y, z): the
+    point is geometrically inside brush b (test_box_in_brush, exact point
+    path), and b does not appear in the leafs the point probe selects at
+    that point (brushes_for_point, cm_leafs.py:280-292). Tests ordered
+    cheapest first: geometric containment, then the (smaller) point-probe
+    box.
+
+    Does NOT test the sweep-probe membership (b in brushes_for_sweep) --
+    that is the costly half, deferred to the caller so it can reuse the
+    sweep set `ground_allsolid` already computes instead of paying for
+    `brushes_for_sweep` a second time (cf. `_delta0_escapes`)."""
     es, ee, radius, offset_z = trace_setup((x, y, z), (x, y, z), PLAYER_MINS, maxs)
     tr = new_trace()
     test_box_in_brush(es, radius, offset_z, planes, tr)
@@ -109,8 +128,48 @@ def condition_b(cm, b, planes, x, y, z, maxs):
     lb = cm._lb
     for li in cm.box_leafnums(bmin, bmax):
         if b in lb[li]:
-            return False        # listed somewhere: no asymmetry here
+            return False        # listed somewhere in the point probe: no asymmetry here
     return True
+
+
+def _z_window_inside(planes, x, y, maxs, zlo, zhi):
+    """The z interval of column (x, y) where the player box is inside brush
+    `planes`, computed ANALYTICALLY. Returns (lo, hi) clipped to
+    [zlo, zhi], or None when the column never touches the brush.
+
+    Why: `test_box_in_brush` is a conjunction of half-space tests, and the box
+    only translates along z, so each plane's test is linear in z --
+    `A + n_z*z <= D` -- and bounds z from one side (or, when `n_z == 0`,
+    settles the whole column at once). Intersecting them gives the exact
+    interval, so every z outside it can be skipped without a single leaf
+    lookup.
+
+    Measured motive: profiling 12 brushes of jm_zoop spent 67s of 133s inside
+    `condition_b_geom`, called 1,845,760 times, 43s of it in `box_leafnums`.
+    Most of those calls are at heights where the box is nowhere near the
+    brush. Exact, no false negative: it reproduces `test_box_in_brush`'s own
+    inequality (cm_faithful.py:136-146)."""
+    offset = tuple((PLAYER_MINS[j] + maxs[j]) * 0.5 for j in range(3))
+    size = tuple(maxs[j] - offset[j] for j in range(3))
+    radius = size[2] if size[0] > size[2] else size[0]
+    offset_z = size[2] - radius
+    ex, ey = x + offset[0], y + offset[1]
+    lo, hi = zlo, zhi
+    for n, d in planes:
+        dist = d + radius + abs(n[2]) * offset_z
+        a = n[0] * ex + n[1] * ey + n[2] * offset[2]   # constant part
+        if abs(n[2]) < 1e-12:
+            if a - dist > 0:
+                return None            # fails at every height
+            continue
+        bound = (dist - a) / n[2]
+        if n[2] > 0:
+            hi = min(hi, bound)
+        else:
+            lo = max(lo, bound)
+        if lo > hi:
+            return None
+    return (lo, hi)
 
 
 def _close_run(run_start, run_end, best):
@@ -126,7 +185,7 @@ def _close_run(run_start, run_end, best):
     return best
 
 
-def _domain_columns(cm, mn, mx, orphan_leafs, maxs):
+def _domain_columns(cm, mn, mx, orphan_leafs, maxs, max_cols=None):
     """The DOMAIN of columns (x, y) shared by vertical_extent_asym AND
     run_delta0_max (the two measures remain distinct, but search the SAME
     set of columns): grid step STEP_GRID + explicit corners/edges of the
@@ -138,6 +197,13 @@ def _domain_columns(cm, mn, mx, orphan_leafs, maxs):
     any grid resolution without this dilation. Exact, zero free parameter,
     same justification as in Z:
         x in [ rect.x0 - maxs[0], rect.x1 - PLAYER_MINS[0] ]   (and likewise in y)
+
+    `max_cols`: give up and return None past that many columns. A brush can
+    own hundreds of orphan leafs (libya #3683: 335), and building its full
+    domain exhausts memory BEFORE the TOO_BIG gate ever gets to reject it --
+    measured, a MemoryError with a 4 GB peak. Cost grows with the column
+    count, so anything above the cap would have been rejected anyway: capping
+    changes no verdict, it only stops paying for one.
     """
     dxlo, dxhi = maxs[0], -PLAYER_MINS[0]
     dylo, dyhi = maxs[1], -PLAYER_MINS[1]
@@ -154,16 +220,25 @@ def _domain_columns(cm, mn, mx, orphan_leafs, maxs):
         cols.add((ox0, oy0)); cols.add((ox0, oy1))
         cols.add((ox1, oy0)); cols.add((ox1, oy1))
         cols.add(((ox0 + ox1) * 0.5, (oy0 + oy1) * 0.5))
+        if max_cols is not None and len(cols) > max_cols:
+            return None
         # edges, step STEP_GRID along the 4 borders
         x = ox0
         while x <= ox1:
             cols.add((x, oy0)); cols.add((x, oy1))
             x += STEP_GRID
+            if max_cols is not None and len(cols) > max_cols:
+                return None
         y = oy0
         while y <= oy1:
             cols.add((ox0, y)); cols.add((ox1, y))
             y += STEP_GRID
-        # inner grid
+            if max_cols is not None and len(cols) > max_cols:
+                return None
+        # inner grid. This one is quadratic in the rectangle, not linear like
+        # the edges above, so it is where an oversized brush actually hurts:
+        # libya #3683 spans the whole map and asks for 18434 x 14493 columns,
+        # 267 million of them. The cap has to be tested here too.
         x = ox0
         while x <= ox1:
             y = oy0
@@ -171,6 +246,8 @@ def _domain_columns(cm, mn, mx, orphan_leafs, maxs):
                 cols.add((x, y))
                 y += STEP_GRID
             x += STEP_GRID
+            if max_cols is not None and len(cols) > max_cols:
+                return None
     return cols
 
 
@@ -229,26 +306,129 @@ def _optimize_column(cols, evaluate, refine=True):
     return best, best_col, n_tested
 
 
-def _delta0_escapes(cm, b, planes, det, mask, x, y, z, maxs):
+def _delta0_escapes(cm, b, planes, det, mask, x, y, z, maxs, widen=False):
     """Tests ONLY index 0 ({0,0,1}) of PM_CorrectAllSolid, not all 26 --
     exact, not an approximation (per the source: {0,0,1} is tried first,
     escapes -> taken, regardless of the other 25).
 
-    Prefilters via `condition_b` AT THE ORIGIN (x, y, z) BEFORE the costly
-    `ground_allsolid` gate: (b) is a NECESSARY precondition for any step of
-    a climb attributable to THIS brush -- no attributable run can leave its
-    (b) region, so testing (b), cheaper (`box_leafnums` alone), before
-    paying for a full swept trace, loses no true positive."""
-    if not condition_b(cm, b, planes, x, y, z, maxs):
+    `widen=True` (SEARCH only, never measurement) also accepts the other 8
+    upward deltas. It must stay confined to `_column_has_potential`:
+    `run_delta0_max` counts escapes at a FIXED column, which only models a
+    climb when the motion is purely vertical. A lateral delta such as
+    (-1,0,1) or (0,1,1) still gains +1 in z, so the run keeps counting while
+    the player actually leaves the column -- measured on mp_farmhouse #3454
+    and mp_trainstation #3308: run 77 and 81 recorded, real climb 1, and
+    in-game the player is simply shoved sideways once. Widening the SEARCH
+    finds real spots (jm_zoop, 8 new `True`, two confirmed in game);
+    widening the MEASUREMENT manufactures false DIVERGENCE.
+
+    Prefilters via `condition_b_geom` AT THE ORIGIN (x, y, z) BEFORE the
+    costly `ground_allsolid` gate: (b) is a NECESSARY precondition for any
+    step of a climb attributable to THIS brush -- no attributable run can
+    leave its (b) region, so testing (b), cheaper (`box_leafnums` alone),
+    before paying for a full swept trace, loses no true positive.
+
+    `ground_sweep_brushes` computes the swept brush set once; `b in sweep`
+    (the other half of the asymmetry condition, cf. `condition_b_geom`'s
+    docstring) is tested on it directly, BEFORE paying for the costly
+    `planes_of` + trace that turns that set into an `allsolid` verdict
+    (`ground_allsolid_from_sweep`) -- so a brush absent from the sweep
+    skips the trace entirely, same as before this function existed, while
+    a brush present in it never recomputes `brushes_for_sweep`."""
+    if not condition_b_geom(cm, b, planes, x, y, z, maxs):
         return False
     pos = (x, y, z)
-    if not det.ground_allsolid(pos, maxs):
+    sweep = det.ground_sweep_brushes(pos, maxs)
+    if b not in sweep:
+        return False            # never submitted to the sweep probe: cannot carry asymmetry
+    if not det.ground_allsolid_from_sweep(pos, maxs, sweep):
+        return False
+    if widen:
+        # Cheaper superset: a prefilter only has to avoid false negatives.
+        # The true condition is "the FIRST escaping delta goes up"; "at least
+        # one UPWARD delta escapes" implies it can never be missed, and only
+        # walks the 9 deltas with dz > 0 instead of all 26.
+        for dx, dy, dz in UPWARD_DELTAS:
+            point = (x + dx, y + dy, z + dz)
+            nums = cm.brushes_for_point(point, PLAYER_MINS, maxs, mask)
+            if not player_trace(point, point, PLAYER_MINS, maxs,
+                                cm.planes_of(nums))['startsolid']:
+                return True
+        return False
+    if widen and BROAD_DELTA:   # experiment override, off by default
+        # Experiment (COD2_BROAD_DELTA=1): the real engine condition is "the
+        # FIRST delta that escapes goes up", not "delta 0 escapes". Measured
+        # on cor27_intoxication #2311: at 2.0 of penetration delta 0 is
+        # blocked, delta 1 (-1,0,1) escapes upward, and the climb still runs
+        # 74 steps -- a case the narrow test cannot see.
+        for dx, dy, dz in CORRECT_SOLID_DELTAS:
+            point = (x + dx, y + dy, z + dz)
+            nums = cm.brushes_for_point(point, PLAYER_MINS, maxs, mask)
+            if not player_trace(point, point, PLAYER_MINS, maxs,
+                                cm.planes_of(nums))['startsolid']:
+                return dz > 0
         return False
     dx, dy, dz = CORRECT_SOLID_DELTAS[0]
     point = (x + dx, y + dy, z + dz)
     nums = cm.brushes_for_point(point, PLAYER_MINS, maxs, mask)
     tr = player_trace(point, point, PLAYER_MINS, maxs, cm.planes_of(nums))
     return not tr['startsolid']
+
+
+def _best_climb_at_column(cm, b, planes, det, mask, x, y, zlo, zhi, maxs):
+    """THE VERDICT: the real `climb()`, run at EVERY escaping height of this
+    column. Returns (n_steps, z_start).
+
+    NOTE: every escaping z, not just the start of each run. Starting lower does
+    NOT imply a longer climb: on jm_kuwehr #17446 the run starts at a height
+    where the climb is 1 step, while the best height of the SAME column climbs
+    136 -- testing run starts only dropped a 137-step elevator outright.
+
+    Replaces `_run_delta0_at_column` as the production criterion. That one
+    counts index-0 escapes at a FIXED column, which only models a climb when
+    the motion is purely vertical, so it is wrong in BOTH directions:
+
+      - it MISSES real climbs that mix deltas -- the player leaves the column
+        and the run stops short of MIN_STEP (jm_zoop 13/14/39/40/45/46/71/72,
+        all confirmed in game);
+      - widened to lateral upward deltas it INVENTS climbs -- the run keeps
+        counting while the player escapes sideways (mp_farmhouse #3454: run
+        77, real climb 1; confirmed in game as a single sideways shove).
+
+    `climb()` is the engine loop itself, so there is nothing left to
+    approximate. The widened gate stays where it belongs, as the SEARCH for
+    candidate heights; the verdict is then exact. Measured: jm_zoop
+    25 True/11 DIVERGENCE -> 36/8, mp_farmhouse 2/0 -> 2/0 with the three
+    false positives gone, for about +20% runtime."""
+    big, small = detect.boxes()
+    probe = detect.MIN_STEP + 1        # enough to answer ">= MIN_STEP ?"
+    best = (0, None)
+    win = _z_window_inside(planes, x, y, maxs, zlo, zhi)
+    if win is None:
+        return best
+    z, zhi = win[0], win[1]
+    while z <= zhi:
+        if _delta0_escapes(cm, b, planes, det, mask, x, y, z, maxs, widen=True):
+            # Capped climb: the loop only has to decide whether the height
+            # reaches MIN_STEP. Running it to 400 at every height was what
+            # pushed the selftest past 900s -- a 136-step climb costs 136
+            # iterations of 26 point traces, and the column holds ~130 such
+            # heights. The winner alone is then measured in full.
+            n, zf, i0 = det.climb((x, y, z), limit=probe)
+            if n > best[0]:
+                best = (n, z)
+            if n >= detect.MIN_STEP:
+                # `check()` inlined, minus the climb it would redo: standing
+                # allsolid is implied by the climb, so only the crouched box
+                # is left to test (detect.py:142-152, RELAX=False).
+                if not det.ground_allsolid((x, y, z), small):
+                    full, _, _ = det.climb((x, y, z), limit=400)
+                    return (full, z)          # confirmed spot, stop here
+        z += DZ
+    if best[1] is not None and best[0] >= detect.MIN_STEP:
+        full, _, _ = det.climb((x, y, best[1]), limit=400)
+        return (full, best[1])
+    return best
 
 
 def _run_delta0_at_column(cm, b, planes, det, mask, x, y, zlo, zhi, maxs):
@@ -283,10 +463,18 @@ def _column_has_potential(cm, b, planes, det, mask, x, y, zlo, zhi, maxs):
     cannot carry ANY run >= MIN_STEP: a ~MIN_STEP factor on the coarse pass's
     cost, losing nothing that matters (runs < MIN_STEP are not spots anyway,
     cf. `detect.MIN_STEP`)."""
+    win = _z_window_inside(planes, x, y, maxs, zlo, zhi)
+    if win is None:
+        return False          # the box never enters the brush on this column
+    wlo, whi = win
+    # Keep the sub-sampling PHASE anchored on zlo: the soundness argument
+    # above is about residues modulo MIN_STEP of the fine scan, which also
+    # starts at zlo. Restarting at wlo would shift the phase and could skip
+    # the only escaping height.
     step_filter = detect.MIN_STEP * DZ
-    z = zlo
-    while z <= zhi:
-        if _delta0_escapes(cm, b, planes, det, mask, x, y, z, maxs):
+    z = zlo + math.ceil((wlo - zlo) / step_filter) * step_filter if wlo > zlo else zlo
+    while z <= whi:
+        if _delta0_escapes(cm, b, planes, det, mask, x, y, z, maxs, widen=True):
             return True
         z += step_filter
     return False
@@ -432,7 +620,7 @@ def spot_exists(cm, det, mask, b, mn, mx, orphan_leafs, maxs=PLAYER_MAXS_STANDIN
     raw_best = (0.0, None, None, None)
     best_blocked = None
     for (x, y) in survivors:
-        r = _run_delta0_at_column(cm, b, planes, det, mask, x, y, zlo, zhi, maxs)
+        r = _best_climb_at_column(cm, b, planes, det, mask, x, y, zlo, zhi, maxs)
         if r[0] > raw_best[0]:
             raw_best = (r[0], x, y, r[1])
         if r[0] >= detect.MIN_STEP:
@@ -530,13 +718,46 @@ def clear_cache():
 
 # --------------------------------------------------------------- orphans (neg)
 
-def orphans_of(name):
-    """List of a map's orphan brush_ids: mask + at least one non-axial plane
-    + orphan (at least one leaf that overlaps it without listing it)."""
+BRUSH_KINDS = ('non-axial', 'axial', 'both')
+
+
+def kind_of(cm, b):
+    """'non-axial' if brush `b` has at least one non-axial plane, else
+    'axial'. Never returns 'both', which is a selection, not a shape."""
+    return 'non-axial' if cm.brushes[b][3] else 'axial'
+
+
+def orphans_of(name, kind='non-axial'):
+    """List of a map's orphan brush_ids: mask + `kind` + orphan (at least one
+    leaf that overlaps it without listing it).
+
+    `kind` selects on the brush's OWN planes:
+      'non-axial'  at least one non-axial plane. The historical default, and
+                   what every result so far was measured with.
+      'axial'      pure AABB, no non-axial plane. Never scanned before.
+      'both'       no selection on shape.
+
+    Why 'axial' is worth scanning: the escape comes from the 2048 margin that
+    `CM_TraceThroughTree` applies to a non-axial BSP *node* plane, which has
+    nothing to do with the carrier brush's own shape. A pure AABB can be an
+    orphan under such a node just as well. The "every spot has an oblique
+    plane" invariant is a selection effect of this filter, not a finding.
+
+    Cost: axial orphans are a minority (measured: 16 against 188 on jm_temple,
+    12 against 156 on jm_zoop, 318 against 1686 on mp_farmhouse). And the CSV
+    resume skips whatever is already recorded, so adding them to a map that was
+    already scanned only processes the new ones.
+    """
+    if kind not in BRUSH_KINDS:
+        raise ValueError('kind must be one of %s' % (BRUSH_KINDS,))
     cm, det, mask = get_map(name)
     out = []
     for b, (mn, mx, ct, pl) in enumerate(cm.brushes):
-        if not (ct & mask) or not pl:
+        if not (ct & mask):
+            continue
+        if kind == 'non-axial' and not pl:
+            continue
+        if kind == 'axial' and pl:
             continue
         rec = leafs_overlapping(cm, mn, mx)
         if any(b not in cm._lb[li] for li in rec):
@@ -551,10 +772,13 @@ MEMORY_CEILING_MB = 2500                        # memory ceiling per child proce
 PERIODE_MEM = 5.0
 
 
+# `brush_kind` was added late: CSVs written before it simply lack the column,
+# and DictReader yields None for it. Readers must treat a missing value as
+# unknown, never as 'axial'.
 PRODUCTION_COLUMNS = ['map', 'brush_id', 'spot', 'run_delta0_max',
                         'n_domain_columns', 'n_survivors',
                         't_prefilter', 't_sweep', 'x_col', 'y_col', 'z_col',
-                        'estimated_cost']
+                        'estimated_cost', 'brush_kind']
 
 # Prefilter cost/test (mod-10 filter), calibrated on real production
 # measurements (t_prefilter, n_domain_columns, height_z). n_tests =
@@ -564,6 +788,45 @@ PRODUCTION_COLUMNS = ['map', 'brush_id', 'spot', 'run_delta0_max',
 # domain): 0.0000242285 s/test -- very close to the total/total ratio
 # (0.0000233070), the two converge.
 COST_PER_TEST_S = 0.0000242285
+
+# Hard cap on the domain size, independent of the time estimate.
+#
+# The time-derived cap alone is not enough: cost scales with n_cols * height_z,
+# so a SHALLOW brush is allowed a huge column count while staying under the
+# time budget. libya #3683 (335 orphan leafs) was granted 12 million columns
+# that way, which is 1.5 GB of tuples per worker, and the raw build died on a
+# MemoryError at 4 GB.
+#
+# A brush over this cap is reported TOO_BIG, which is honest -- it was never
+# measured -- rather than taking the machine down.
+#
+# 100,000, recalibrated on 2026-08-17. This cap is a MEMORY guard, not a cost
+# guard: cost is what BUDGET_BRUSH_S is for. Conflating the two is what made
+# the previous value (20,000) drop a real spot.
+#
+# Calibration, redone properly: the domain of all 174 known elevators
+# recomputed FROM THE CLIPMAP, not read from the CSV column. The earlier
+# figure ("largest domain that ever produced a spot: 8,984") only covered the
+# spots whose CSV happened to record `n_domain_columns`, which silently
+# excluded every older CSV -- hill400_assault #8189 among them, a confirmed
+# spot with a domain of 35,631 columns, rejected as TOO_BIG by the 20,000 cap.
+#
+#   median 177, p90 907, p99 8,984, MAX 35,631 (#8189, 4x the next one)
+#   cap  20,000 -> 1 elevator lost      cap 50,000 -> 0
+#   cap 100,000 -> 0, and 2.8x margin over the record
+#
+# 100,000 columns is about 12 MB of tuples, against the 1.5 GB per worker that
+# motivated having a cap at all (libya #3683 asked for 267 million).
+MAX_DOMAIN_COLUMNS = 100 * 1000
+
+# Experiment switch, off by default: widen the delta gate from "index 0
+# escapes" to "the first escaping delta goes up". See `_delta0_escapes`.
+BROAD_DELTA = os.environ.get('COD2_BROAD_DELTA') == '1'
+
+# Cheaper variant of the same widening (COD2_UP_DELTA=1): only the 9 deltas
+# with dz > 0, as a superset prefilter. See `_delta0_escapes`.
+UP_DELTA = os.environ.get('COD2_UP_DELTA') == '1'
+UPWARD_DELTAS = tuple(d for d in CORRECT_SOLID_DELTAS if d[2] > 0)
 
 
 def _spot_exists_isolated(name, b, q):
@@ -608,7 +871,7 @@ def _spot_exists_isolated(name, b, q):
         best_blocked = None                     # best run >= MIN_STEP but check() refuses (DIVERGENCE)
         found = False
         for (x, y) in survivors:
-            r = _run_delta0_at_column(cm, b, planes, det, mask, x, y, zlo, zhi, PLAYER_MAXS_STANDING)
+            r = _best_climb_at_column(cm, b, planes, det, mask, x, y, zlo, zhi, PLAYER_MAXS_STANDING)
             if r[0] > raw_best[0]:
                 raw_best = (r[0], x, y, r[1])
             if r[0] >= detect.MIN_STEP:
@@ -633,8 +896,44 @@ def _spot_exists_isolated(name, b, q):
            'x_col': x_col, 'y_col': y_col, 'z_col': z_col})
 
 
-BUDGET_BRUSH_S = 10 * 60      # hard budget per brush: some brushes with a huge
-                                # domain can block a worker indefinitely
+# Hard runtime budget per brush: some brushes with a huge domain can block a
+# worker indefinitely.
+#
+# 60s, measured, not guessed. Across the 106 spots whose timing was recorded,
+# the slowest ever took 16.37s (jm_lazlo #137) -- median 0.24s, p90 1.29s. So
+# 60s leaves a 3.7x margin over anything that has ever produced a spot, while
+# cutting the negative tail, which reaches 253s. At 10s two real spots would
+# have been lost, so do not go lower without redoing this measurement.
+# Caveat: 77 older spots come from CSVs written before the timing columns
+# existed. They completed under the previous 600s budget, but nothing proves
+# they ran under 60s.
+# 5s, remeasured on 2026-08-17 after the z-window pruning (_z_window_inside).
+#
+# The old 60s (and the 600s before it) were calibrated on the run_delta0_max
+# proxy, where the slowest spot ever took 16.4s. The climb() verdict stops at
+# the FIRST confirmed column, so a brush that carries an elevator is now cheap:
+# across every map measured with it, the slowest one costs 1.68s
+# (mp_farmhouse), 0.23s on jm_zoop, 0.20s on mp_trainstation. The expensive
+# brushes are the NEGATIVES, which must exhaust all their columns.
+#
+# Same verdicts at every budget tried -- jm_zoop 36 spots + 8 DIVERGENCE,
+# jm_kuwehr 0 + 4, mp_trainstation 0 + 1 -- only the count of unmeasured
+# brushes and the runtime move (jm_zoop, 3 workers):
+#     3s -> 46s      5s -> 61s      10s -> 94s      120s -> 200s
+# A higher budget buys no elevator, it only settles negatives. Since the
+# z-window pruning the slowest carrier across every map measured costs 0.80s
+# (median 0.12s, p90 0.28s), so 5s keeps a 6x margin; 3s would cut it to 3.75x,
+# too thin on an unseen map given how often a "safe" calibration has turned out
+# to rest on a biased sample.
+BUDGET_BRUSH_S = 5
+
+# Threshold for the TOO_BIG pre-rejection, on the ESTIMATED cost. Deliberately
+# NOT lowered with the runtime budget: the estimate is a rough model, and a
+# brush it prices at 90s can run in 2s. Keeping it where it was means this
+# change can only convert a slow negative into BUDGET_EXCEEDED, never
+# pre-reject a brush that would have been measured before. For reference, the
+# most expensive spot ever was estimated at 13.4s.
+TOO_BIG_ESTIMATE_S = 10 * 60
 
 
 def _spot_exists_within_budget(name, b, budget_s=BUDGET_BRUSH_S):
@@ -679,16 +978,26 @@ def _estimated_cost(cm, mn, mx, orphan_leafs, maxs=PLAYER_MAXS_STANDING):
     costly work. n_tests = n_cols * (height_z / 10), EXACTLY the number
     of iterations of the mod-10 filter (`_column_has_potential`). Returns
     (estimated_cost_s, n_cols, cols) -- `cols` is reusable by the caller to
-    avoid rebuilding the domain twice."""
-    cols = _domain_columns(cm, mn, mx, orphan_leafs, maxs)
+    avoid rebuilding the domain twice.
+
+    The domain is built under a cap derived from `TOO_BIG_ESTIMATE_S`: past it
+    the brush is TOO_BIG whatever the exact count, so `cols` comes back None
+    and the reported cost is a LOWER BOUND (the cap), enough to order a
+    catch-up pass. Without this, a brush with hundreds of orphan leafs
+    exhausts memory before it can be rejected."""
     zlo = mn[2] - maxs[2]
     zhi = mx[2] - PLAYER_MINS[2]
     height_z = zhi - zlo
-    n_tests = len(cols) * (height_z / 10.0)
-    return n_tests * COST_PER_TEST_S, len(cols), cols
+    per_col = max(height_z / 10.0, 1e-9) * COST_PER_TEST_S
+    max_cols = min(int(TOO_BIG_ESTIMATE_S / per_col) + 1, MAX_DOMAIN_COLUMNS)
+    cols = _domain_columns(cm, mn, mx, orphan_leafs, maxs, max_cols=max_cols)
+    if cols is None:
+        return max_cols * per_col, None, None
+    return len(cols) * per_col, len(cols), cols
 
 
-def _spot_exists_with_estimate(name, b, without_budget=False):
+def _spot_exists_with_estimate(name, b, without_budget=False,
+                               budget_s=BUDGET_BRUSH_S):
     """Decides BEFORE starting the prefilter: if the estimated cost exceeds
     the budget, marks TOO_BIG immediately -- does NOT consume the 10
     minutes. The estimate is written in ALL cases (even brushes that pass),
@@ -704,28 +1013,33 @@ def _spot_exists_with_estimate(name, b, without_budget=False):
     orphan_leafs = [li for li in rec if b not in cm._lb[li]]
     estimated_cost, n_cols, cols = _estimated_cost(cm, mn, mx, orphan_leafs)
 
-    if not without_budget and estimated_cost > BUDGET_BRUSH_S:
+    if cols is None or (not without_budget and estimated_cost > TOO_BIG_ESTIMATE_S):
         return {'map': name, 'brush_id': b, 'spot': 'TOO_BIG',
-                'run_delta0_max': 'TOO_BIG', 'n_domain_columns': n_cols,
+                'run_delta0_max': 'TOO_BIG',
+                'n_domain_columns': '' if n_cols is None else n_cols,
                 'n_survivors': '', 't_prefilter': '', 't_sweep': '',
-                'x_col': '', 'y_col': '', 'z_col': '', 'estimated_cost': estimated_cost}
+                'x_col': '', 'y_col': '', 'z_col': '',
+                'estimated_cost': estimated_cost, 'brush_kind': kind_of(cm, b)}
 
     if without_budget:
         q = _FileFakeQueue()
         _spot_exists_isolated(name, b, q)
         row = q.item
     else:
-        row = _spot_exists_within_budget(name, b)
+        row = _spot_exists_within_budget(name, b, budget_s)
         if row is None:
             return {'map': name, 'brush_id': b, 'spot': 'BUDGET_EXCEEDED',
                     'run_delta0_max': 'BUDGET_EXCEEDED', 'n_domain_columns': '',
                     'n_survivors': '', 't_prefilter': '', 't_sweep': '',
-                    'x_col': '', 'y_col': '', 'z_col': '', 'estimated_cost': estimated_cost}
+                    'x_col': '', 'y_col': '', 'z_col': '',
+                    'estimated_cost': estimated_cost, 'brush_kind': kind_of(cm, b)}
     row['estimated_cost'] = estimated_cost
+    row['brush_kind'] = kind_of(cm, b)
     return row
 
 
-def _worker_production(q_taches, q_results, without_budget=False):
+def _worker_production(q_taches, q_results, without_budget=False,
+                       budget_s=BUDGET_BRUSH_S):
     import signal
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     while True:
@@ -733,7 +1047,8 @@ def _worker_production(q_taches, q_results, without_budget=False):
         if item is None:
             break
         name, b = item
-        row = _spot_exists_with_estimate(name, b, without_budget=without_budget)
+        row = _spot_exists_with_estimate(name, b, without_budget=without_budget,
+                                         budget_s=budget_s)
         q_results.put(row)
 
 
@@ -778,7 +1093,148 @@ def _purge_categories(name, categories):
             w.writerow({k: r.get(k, '') for k in PRODUCTION_COLUMNS})
 
 
-def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False):
+
+def migrate_csv_columns(path):
+    """Bring an existing results CSV up to the current column set.
+
+    The results file is opened in APPEND mode and its header is only written
+    when the file does not exist. So a CSV created before a column was added
+    keeps its old, shorter header while newly appended rows carry the extra
+    values, and `csv.DictReader` silently drops them. That is exactly how
+    `brush_kind` was lost on moscow: a 12-column header, 1050 rows of 12
+    fields and 112 rows of 13.
+
+    Rewrites the file in place with the current header, keeping every value:
+    fields beyond the old header map, in order, to the columns that were added
+    since. Rows shorter than the header are padded. No-op when the header
+    already matches. Returns True when the file was rewritten.
+    """
+    if not os.path.exists(path):
+        return False
+    with open(path, newline='') as fh:
+        rows = list(csv.reader(fh))
+    if not rows:
+        return False
+    old = rows[0]
+    if old == PRODUCTION_COLUMNS:
+        return False
+    added = [c for c in PRODUCTION_COLUMNS if c not in old]
+    out = []
+    for r in rows[1:]:
+        d = dict(zip(old, r))
+        for i, v in enumerate(r[len(old):]):
+            if i < len(added):
+                d[added[i]] = v
+        out.append({k: d.get(k, '') for k in PRODUCTION_COLUMNS})
+    tmp = path + '.migrating'
+    with open(tmp, 'w', newline='') as fh:
+        w = csv.DictWriter(fh, fieldnames=PRODUCTION_COLUMNS)
+        w.writeheader()
+        w.writerows(out)
+    os.replace(tmp, path)          # atomic: never leaves a half-written CSV
+    return True
+
+
+# --------------------------------------------------------------- progress bar
+#
+# Display only: no scan logic depends on any of this. Two lines redrawn in
+# place -- the bar, and live counters underneath -- replacing the old "every
+# 200 brushes" print and the per-brush event lines, without scrolling anything
+# away. TOO_BIG / BUDGET_EXCEEDED no longer print one line each: they are
+# counted live and detailed in the final recap.
+#
+# It is disabled when stdout is not a terminal (output redirected to a file, or
+# piped): a stream of '\r' frames would bloat the file and hide the events. In
+# that case the old periodic line comes back, unchanged.
+BAR_ENABLED = sys.stdout.isatty()
+BAR_WIDTH = 28
+
+
+def _enable_vt():
+    """Windows consoles need ENABLE_VIRTUAL_TERMINAL_PROCESSING before they
+    honour ANSI escapes. Windows Terminal has it on already, the legacy
+    conhost does not. Returns False if it cannot be turned on, and the bar
+    then falls back to a single line -- never to garbage escape codes."""
+    if os.name != 'nt':
+        return True
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.GetStdHandle(-11)                 # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not k.GetConsoleMode(h, ctypes.byref(mode)):
+            return False
+        return bool(k.SetConsoleMode(h, mode.value | 0x0004))
+    except Exception:
+        return False
+
+
+# Two-line display (bar + live counters) needs cursor-up, hence ANSI.
+BAR_TWO_LINE = BAR_ENABLED and _enable_vt()
+_BAR_ON = False          # a bar is currently drawn on screen
+
+
+def _bar_draw(n_done, total, t0, peak_mem, counts=None):
+    """Redraw in place:
+
+        [####------] 37/204  18%  3.08 brush/s  eta 0:54  mem 154Mo
+        Spots : 3   Divergence : 2   Skipped : 1
+
+    No-op when not on a terminal. Falls back to one line when ANSI is
+    unavailable (counters appended to the bar instead)."""
+    global _BAR_ON
+    if not BAR_ENABLED or not total:
+        return
+    import time
+    dt = max(time.time() - t0, 1e-9)
+    rate = n_done / dt
+    frac = float(n_done) / total
+    filled = int(BAR_WIDTH * frac)
+    eta = (total - n_done) / rate if rate > 0 else 0.0
+    bar = ("  [%s%s] %d/%d  %3.0f%%  %.2f brush/s  eta %d:%02d  mem %dMo"
+           % ('#' * filled, '-' * (BAR_WIDTH - filled), n_done, total,
+              frac * 100.0, rate, int(eta) // 60, int(eta) % 60, peak_mem))
+    n_spot, n_div, n_skip = counts or (0, 0, 0)
+    line2 = ("  Spots : %d   Divergence : %d   Skipped : %d"
+             % (n_spot, n_div, n_skip))
+    if BAR_TWO_LINE:
+        sys.stdout.write('\r\x1b[K' + bar + '\n\x1b[K' + line2 + '\x1b[1A\r')
+    else:
+        sys.stdout.write('\r' + bar + line2.replace('  Spots', '  |  Spots'))
+    sys.stdout.flush()
+    _BAR_ON = True
+
+
+def _bar_clear():
+    """Wipe the live display, leaving the cursor where it can print freely."""
+    global _BAR_ON
+    if not _BAR_ON:
+        return
+    if BAR_TWO_LINE:
+        sys.stdout.write('\r\x1b[K\n\x1b[K\x1b[1A\r')
+    else:
+        sys.stdout.write('\r' + ' ' * 200 + '\r')
+    sys.stdout.flush()
+    _BAR_ON = False
+
+
+def _bar_log(msg):
+    """Print an event line above the live display, without fragments."""
+    _bar_clear()
+    print(msg)
+
+
+def _bar_close():
+    """Leave the finished display on screen and move below it."""
+    global _BAR_ON
+    if _BAR_ON:
+        sys.stdout.write('\n\n' if BAR_TWO_LINE else '\n')
+        sys.stdout.flush()
+    _BAR_ON = False
+
+
+def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False,
+                 kind='non-axial', budget_s=BUDGET_BRUSH_S):
     """PRODUCTION pipeline over ONE COMPLETE map (all its orphan brushes, not
     a sample). RESUMES, NEVER REDOES: a crash or abort only costs whatever
     is not yet written to the CSV, never the whole map. Memory ceiling
@@ -793,13 +1249,22 @@ def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False):
     `without_budget=True`: explicit catch-up pass -- resumes precisely the
     brushes marked TOO_BIG/BUDGET_EXCEEDED (excluded from a normal resume),
     with no time budget or pre-estimation. First purges their stale rows
-    from the CSV to avoid duplicates."""
+    from the CSV to avoid duplicates.
+
+    `kind`: which brushes to consider, see `orphans_of`. Resuming makes the
+    passes composable: running a map with 'non-axial' then again with 'axial'
+    measures each brush exactly once.
+
+    `budget_s`: runtime budget per brush, see BUDGET_BRUSH_S. Raise it to
+    revisit brushes the default cuts off; a brush already written as
+    BUDGET_EXCEEDED is skipped by the resume, so use `--no-budget` to actually
+    retry those."""
     import multiprocessing as mp
     import time
     import queue as _queue
     import memwatch
 
-    brushes_all = orphans_of(name)
+    brushes_all = orphans_of(name, kind)
     exclude = CATEGORIES_A_REJOUER if without_budget else ()
     already_done = _brushes_already_done(name, exclude_categories=exclude)
     remaining = [b for b in brushes_all if b not in already_done]
@@ -814,6 +1279,8 @@ def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False):
     if without_budget:
         _purge_categories(name, CATEGORIES_A_REJOUER)
     out_path = os.path.join(SCRATCH, 'production_%s.csv' % name)
+    if migrate_csv_columns(out_path):
+        print("  (CSV migrated to the current columns: %s)" % os.path.basename(out_path))
     write_header = not os.path.exists(out_path)
 
     ctx = mp.get_context('spawn')
@@ -824,7 +1291,8 @@ def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False):
     for _ in range(jobs):
         q_taches.put(None)
 
-    workers = [ctx.Process(target=_worker_production, args=(q_taches, q_results, without_budget))
+    workers = [ctx.Process(target=_worker_production,
+                           args=(q_taches, q_results, without_budget, budget_s))
                for _ in range(jobs)]
     for w in workers:
         w.start()
@@ -860,9 +1328,13 @@ def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False):
             except _queue.Empty:
                 m = memwatch.memory_mb(watched)
                 peak_mem = max(peak_mem, m)
+                # Refresh here too: with a per-brush budget the queue can stay
+                # silent for seconds, and a frozen bar reads like a hang.
+                _bar_draw(n_done, len(remaining), t0, peak_mem,
+                          (n_spots, n_divergence, n_too_big + n_budget_exceeded))
                 if m > MEMORY_CEILING_MB:
-                    print("  !! MEMORY CEILING EXCEEDED (%d Mo > %d) -- stopping, rerun will resume"
-                          % (m, MEMORY_CEILING_MB))
+                    _bar_log("  !! MEMORY CEILING EXCEEDED (%d Mo > %d) -- stopping, rerun will resume"
+                             % (m, MEMORY_CEILING_MB))
                     memory_abandoned = True
                     break
                 continue
@@ -870,13 +1342,12 @@ def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False):
             fh.flush()
             n_done += 1
             if row['spot'] == 'TOO_BIG':
+                # No per-brush line for TOO_BIG / BUDGET_EXCEEDED: they are
+                # counted live under the bar and detailed in the final recap
+                # (`production.py budget` lists them individually).
                 n_too_big += 1
-                print("  !! TOO BIG: %s #%s  estimated_cost=%.0fs (>%ds) -- skipped before even prefiltering"
-                      % (row['map'], row['brush_id'], row['estimated_cost'], BUDGET_BRUSH_S))
             elif row['spot'] == 'BUDGET_EXCEEDED':
                 n_budget_exceeded += 1
-                print("  !! BUDGET EXCEEDED: %s #%s (>%d min) -- marked, not measured"
-                      % (row['map'], row['brush_id'], BUDGET_BRUSH_S // 60))
             else:
                 total_prefilter += row['t_prefilter']
                 total_sweep += row['t_sweep']
@@ -884,21 +1355,19 @@ def cmd_map_cost(name, jobs=DEFAULT_WORKERS, without_budget=False):
                 if row['n_survivors'] >= 1:
                     n_survivors_total += 1
                 if row['spot'] == 'DIVERGENCE':
+                    # Both are shown live as counters under the bar, and listed
+                    # in full (ids and coordinates) in the final recap.
                     n_divergence += 1
-                    print("  !! DIVERGENCE: %s #%s  run_delta0_max=%s  (%.0f, %.0f) --"
-                          " the pipeline says >=MIN_STEP but detect.py check() says no. NEITHER spot NOR negative."
-                          % (row['map'], row['brush_id'], row['run_delta0_max'],
-                             row['x_col'], row['y_col']))
                 elif row['spot'] is True:
                     n_spots += 1
-                    print("  ** SPOT (confirmed by detect.py): %s #%s  run_delta0_max=%s  (%.0f, %.0f)"
-                          % (row['map'], row['brush_id'], row['run_delta0_max'],
-                             row['x_col'], row['y_col']))
-            if n_done % 200 == 0 or n_done == len(remaining):
+            _bar_draw(n_done, len(remaining), t0, peak_mem,
+                      (n_spots, n_divergence, n_too_big + n_budget_exceeded))
+            if not BAR_ENABLED and (n_done % 200 == 0 or n_done == len(remaining)):
                 dt = time.time() - t0
                 print("  %d/%d  (%.0fs elapsed, %.2f brush/s, peak memory %dMo)"
                       % (n_done, len(remaining), dt, n_done / max(dt, 1e-9), peak_mem))
     finally:
+        _bar_close()
         fh.close()
         for w in workers:
             if w.is_alive():
@@ -957,15 +1426,30 @@ def main():
     cmd = sys.argv[1]
     if cmd == 'map-cost':
         if len(sys.argv) < 3:
-            print("usage: characterize.py map-cost <map> [--jobs N] [--no-budget] [--maps-dir d]")
+            print("usage: characterize.py map-cost <map> [--jobs N] [--no-budget]"
+                  " [--budget SECONDS] [--brushes non-axial|axial|both]"
+                  " [--maps-dir d]")
             return 2
         jobs = DEFAULT_WORKERS
         if '--jobs' in sys.argv:
             jobs = int(sys.argv[sys.argv.index('--jobs') + 1])
         if '--maps-dir' in sys.argv:
             cm_leafs.set_maps_dir(sys.argv[sys.argv.index('--maps-dir') + 1])
+        budget_s = BUDGET_BRUSH_S
+        if '--budget' in sys.argv:
+            budget_s = float(sys.argv[sys.argv.index('--budget') + 1])
+            if budget_s <= 0:
+                print("--budget must be a positive number of seconds")
+                return 2
+        kind = 'non-axial'
+        if '--brushes' in sys.argv:
+            kind = sys.argv[sys.argv.index('--brushes') + 1]
+            if kind not in BRUSH_KINDS:
+                print("--brushes must be one of %s" % (BRUSH_KINDS,))
+                return 2
         without_budget = '--no-budget' in sys.argv
-        return cmd_map_cost(sys.argv[2], jobs=jobs, without_budget=without_budget)
+        return cmd_map_cost(sys.argv[2], jobs=jobs, without_budget=without_budget,
+                            kind=kind, budget_s=budget_s)
 
 
 if __name__ == '__main__':
