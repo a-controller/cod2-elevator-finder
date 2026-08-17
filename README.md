@@ -60,11 +60,10 @@ rounding alone is sometimes enough to miss the column. Its trailing `0` is the
 yaw the command requires.
 
 **That command does not scan the whole map.** By default it only looks at
-brushes that have at least one non-axial plane, which is where every spot
-found so far lives. To cover purely axis-aligned brushes too, add
-`--brushes both`. It costs little and re-scans nothing you already did, but
-read "Axial brushes" first: no axial spot has been found yet, so this is an
-open question rather than a setting you should always turn on.
+brushes that have at least one non-axial plane, where the large majority of
+spots live. To cover purely axis-aligned brushes too, add `--brushes both`.
+It costs little and re-scans nothing you already did, and it is worth doing:
+axial spots are rare, but they exist -- see "Axial brushes".
 
 The scan runs on three worker processes by default. On a machine you want to
 keep using while it works, or one that is short on cores or memory, lower it:
@@ -263,10 +262,10 @@ python production.py run <map> --brushes both    --maps-dir "C:\path\to\your\map
 ```
 
 Axial candidates are a minority: 45 against 418 on `mp_trainstation`, 114
-against 2718 on `crossroads`, 317 against 1686 on `mp_farmhouse`. And because the CSV resume
-skips whatever is already recorded, the passes compose: running a map with the
-default and then again with `--brushes axial` measures every brush exactly
-once, and re-scans nothing.
+against 2718 on `crossroads`, 317 against 1686 on `mp_farmhouse`. And because
+the CSV resume skips whatever is already recorded, the passes compose: running
+a map with the default and then again with `--brushes axial` measures every
+brush exactly once, and re-scans nothing.
 
 Axial spots do exist, and they are rare: 3 found across roughly 9,000 axial
 brushes measured, against 87 for 61,000 non-axial ones. One of them,
